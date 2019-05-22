@@ -7,11 +7,15 @@
 #include "packager/file/file.h"
 
 #include <gflags/gflags.h>
+#include <inttypes.h>
 #include <algorithm>
 #include <memory>
 #include "packager/base/files/file_util.h"
 #include "packager/base/logging.h"
+#include "packager/base/strings/string_number_conversions.h"
 #include "packager/base/strings/string_piece.h"
+#include "packager/base/strings/stringprintf.h"
+#include "packager/file/callback_file.h"
 #include "packager/file/file_util.h"
 #include "packager/file/local_file.h"
 #include "packager/file/memory_file.h"
@@ -23,7 +27,7 @@ DEFINE_uint64(io_cache_size,
               "Size of the threaded I/O cache, in bytes. Specify 0 to disable "
               "threaded I/O.");
 DEFINE_uint64(io_block_size,
-              2ULL << 20,
+              1ULL << 16,
               "Size of the block size used for threaded I/O, in bytes.");
 
 // Needed for Windows weirdness which somewhere defines CopyFile as CopyFileW.
@@ -33,9 +37,10 @@ DEFINE_uint64(io_block_size,
 
 namespace shaka {
 
+const char* kCallbackFilePrefix = "callback://";
 const char* kLocalFilePrefix = "file://";
-const char* kUdpFilePrefix = "udp://";
 const char* kMemoryFilePrefix = "memory://";
+const char* kUdpFilePrefix = "udp://";
 
 namespace {
 
@@ -46,11 +51,14 @@ typedef bool (*FileAtomicWriteFunction)(const char* file_name,
 
 struct FileTypeInfo {
   const char* type;
-  size_t type_length;
   const FileFactoryFunction factory_function;
   const FileDeleteFunction delete_function;
   const FileAtomicWriteFunction atomic_write_function;
 };
+
+File* CreateCallbackFile(const char* file_name, const char* mode) {
+  return new CallbackFile(file_name, mode);
+}
 
 File* CreateLocalFile(const char* file_name, const char* mode) {
   return new LocalFile(file_name, mode);
@@ -99,21 +107,26 @@ bool DeleteMemoryFile(const char* file_name) {
 static const FileTypeInfo kFileTypeInfo[] = {
     {
         kLocalFilePrefix,
-        strlen(kLocalFilePrefix),
         &CreateLocalFile,
         &DeleteLocalFile,
         &WriteLocalFileAtomically,
     },
-    {kUdpFilePrefix, strlen(kUdpFilePrefix), &CreateUdpFile, nullptr, nullptr},
-    {kMemoryFilePrefix, strlen(kMemoryFilePrefix), &CreateMemoryFile,
-     &DeleteMemoryFile, nullptr},
+    {kUdpFilePrefix, &CreateUdpFile, nullptr, nullptr},
+    {kMemoryFilePrefix, &CreateMemoryFile, &DeleteMemoryFile, nullptr},
+    {kCallbackFilePrefix, &CreateCallbackFile, nullptr, nullptr},
 };
+
+base::StringPiece GetFileTypePrefix(base::StringPiece file_name) {
+  size_t pos = file_name.find("://");
+  return (pos == std::string::npos) ? "" : file_name.substr(0, pos + 3);
+}
 
 const FileTypeInfo* GetFileTypeInfo(base::StringPiece file_name,
                                     base::StringPiece* real_file_name) {
+  base::StringPiece file_type_prefix = GetFileTypePrefix(file_name);
   for (const FileTypeInfo& file_type : kFileTypeInfo) {
-    if (strncmp(file_type.type, file_name.data(), file_type.type_length) == 0) {
-      *real_file_name = file_name.substr(file_type.type_length);
+    if (file_type_prefix == file_type.type) {
+      *real_file_name = file_name.substr(file_type_prefix.size());
       return &file_type;
     }
   }
@@ -128,8 +141,10 @@ File* File::Create(const char* file_name, const char* mode) {
   std::unique_ptr<File, FileCloser> internal_file(
       CreateInternalFile(file_name, mode));
 
-  if (!strncmp(file_name, kMemoryFilePrefix, strlen(kMemoryFilePrefix))) {
-    // Disable caching for memory files.
+  base::StringPiece file_type_prefix = GetFileTypePrefix(file_name);
+  if (file_type_prefix == kMemoryFilePrefix ||
+      file_type_prefix == kCallbackFilePrefix) {
+    // Disable caching for memory and callback files.
     return internal_file.release();
   }
 
@@ -235,8 +250,10 @@ bool File::WriteStringToFile(const char* file_name,
                << contents.size() << " bytes.";
     return false;
   }
-  if (!file->Flush()) {
-    LOG(ERROR) << "Failed to flush the file '" << file_name << "'.";
+  if (!file.release()->Close()) {
+    LOG(ERROR)
+        << "Failed to close file '" << file_name
+        << "', possibly file permission issue or running out of disk space.";
     return false;
   }
   return true;
@@ -287,6 +304,12 @@ bool File::Copy(const char* from_file_name, const char* to_file_name) {
 
     total_bytes_written += bytes_written;
   }
+  if (!output_file.release()->Close()) {
+    LOG(ERROR)
+        << "Failed to close file '" << to_file_name
+        << "', possibly file permission issue or running out of disk space.";
+    return false;
+  }
   return true;
 }
 
@@ -326,6 +349,34 @@ int64_t File::CopyFile(File* source, File* destination, int64_t max_copy) {
   }
 
   return bytes_copied;
+}
+
+std::string File::MakeCallbackFileName(
+    const BufferCallbackParams& callback_params,
+    const std::string& name) {
+  if (name.empty())
+    return "";
+  return base::StringPrintf("%s%" PRIdPTR "/%s", kCallbackFilePrefix,
+                            reinterpret_cast<intptr_t>(&callback_params),
+                            name.c_str());
+}
+
+bool File::ParseCallbackFileName(const std::string& callback_file_name,
+                                 const BufferCallbackParams** callback_params,
+                                 std::string* name) {
+  size_t pos = callback_file_name.find("/");
+  int64_t callback_address = 0;
+  if (pos == std::string::npos ||
+      !base::StringToInt64(callback_file_name.substr(0, pos),
+                           &callback_address)) {
+    LOG(ERROR) << "Expecting CallbackFile with name like "
+                  "'<callback address>/<entity name>', but seeing "
+               << callback_file_name;
+    return false;
+  }
+  *callback_params = reinterpret_cast<BufferCallbackParams*>(callback_address);
+  *name = callback_file_name.substr(pos + 1);
+  return true;
 }
 
 }  // namespace shaka

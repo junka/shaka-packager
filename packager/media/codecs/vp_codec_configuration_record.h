@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_CODECS_VP_CODEC_CONFIGURATION_RECORD_H_
-#define MEDIA_CODECS_VP_CODEC_CONFIGURATION_RECORD_H_
+#ifndef PACKAGER_MEDIA_CODECS_VP_CODEC_CONFIGURATION_RECORD_H_
+#define PACKAGER_MEDIA_CODECS_VP_CODEC_CONFIGURATION_RECORD_H_
 
 #include <stdint.h>
 #include <string>
@@ -187,6 +187,11 @@ class VPCodecConfigurationRecord {
   /// @return false if there is parsing errors.
   bool ParseWebM(const std::vector<uint8_t>& data);
 
+  /// Compute and set VP9 Level based on the input attributes.
+  void SetVP9Level(uint16_t width,
+                   uint16_t height,
+                   double sample_duration_seconds);
+
   /// @param data should not be null.
   /// Writes VP codec configuration record to buffer using MP4 format.
   void WriteMP4(std::vector<uint8_t>* data) const;
@@ -290,4 +295,4 @@ class VPCodecConfigurationRecord {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_CODECS_VP_CODEC_CONFIGURATION_RECORD_H_
+#endif  // PACKAGER_MEDIA_CODECS_VP_CODEC_CONFIGURATION_RECORD_H_

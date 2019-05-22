@@ -25,8 +25,10 @@ TEST_F(UdpOptionsTest, AddressAndPort) {
   EXPECT_EQ(88u, options->port());
   // The below fields are not set.
   EXPECT_FALSE(options->reuse());
-  EXPECT_EQ("", options->interface_address());
+  EXPECT_EQ("0.0.0.0", options->interface_address());
   EXPECT_EQ(0u, options->timeout_us());
+  EXPECT_FALSE(options->is_source_specific_multicast());
+  EXPECT_EQ("0.0.0.0", options->source_address());
 }
 
 TEST_F(UdpOptionsTest, MissingPort) {
@@ -55,6 +57,8 @@ TEST_F(UdpOptionsTest, UdpInterfaceAddressFlag) {
   EXPECT_FALSE(options->reuse());
   EXPECT_EQ("10.11.12.13", options->interface_address());
   EXPECT_EQ(0u, options->timeout_us());
+  EXPECT_FALSE(options->is_source_specific_multicast());
+  EXPECT_EQ("0.0.0.0", options->source_address());
 }
 
 TEST_F(UdpOptionsTest, Reuse) {
@@ -62,8 +66,10 @@ TEST_F(UdpOptionsTest, Reuse) {
   EXPECT_EQ("224.1.2.30", options->address());
   EXPECT_EQ(88u, options->port());
   EXPECT_TRUE(options->reuse());
-  EXPECT_EQ("", options->interface_address());
+  EXPECT_EQ("0.0.0.0", options->interface_address());
   EXPECT_EQ(0u, options->timeout_us());
+  EXPECT_FALSE(options->is_source_specific_multicast());
+  EXPECT_EQ("0.0.0.0", options->source_address());
 }
 
 TEST_F(UdpOptionsTest, InvalidReuse) {
@@ -78,21 +84,42 @@ TEST_F(UdpOptionsTest, InterfaceAddress) {
   EXPECT_FALSE(options->reuse());
   EXPECT_EQ("10.11.12.13", options->interface_address());
   EXPECT_EQ(0u, options->timeout_us());
+  EXPECT_FALSE(options->is_source_specific_multicast());
+  EXPECT_EQ("0.0.0.0", options->source_address());
+}
+
+TEST_F(UdpOptionsTest, SourceAddress) {
+  auto options = UdpOptions::ParseFromString(
+      "224.1.2.30:88?interface=10.11.12.13&source=10.14.15.16");
+  EXPECT_EQ("224.1.2.30", options->address());
+  EXPECT_EQ(88u, options->port());
+  EXPECT_FALSE(options->reuse());
+  EXPECT_EQ("10.11.12.13", options->interface_address());
+  EXPECT_EQ(0u, options->timeout_us());
+  EXPECT_TRUE(options->is_source_specific_multicast());
+  EXPECT_EQ("10.14.15.16", options->source_address());
 }
 
 TEST_F(UdpOptionsTest, Timeout) {
   auto options = UdpOptions::ParseFromString(
-      "224.1.2.30:88?source=10.11.12.13&timeout=88888888");
+      "224.1.2.30:88?interface=10.11.12.13&timeout=88888888");
   EXPECT_EQ("224.1.2.30", options->address());
   EXPECT_EQ(88u, options->port());
   EXPECT_FALSE(options->reuse());
   EXPECT_EQ("10.11.12.13", options->interface_address());
   EXPECT_EQ(88888888u, options->timeout_us());
+  EXPECT_FALSE(options->is_source_specific_multicast());
+  EXPECT_EQ("0.0.0.0", options->source_address());
 }
 
 TEST_F(UdpOptionsTest, InvalidTimeout) {
   ASSERT_FALSE(UdpOptions::ParseFromString(
-      "224.1.2.30:88?source=10.11.12.13&timeout=1a9"));
+      "224.1.2.30:88?interface=10.11.12.13&timeout=1a9"));
+}
+
+TEST_F(UdpOptionsTest, BufferSize) {
+  auto options = UdpOptions::ParseFromString("224.1.2.30:88?buffer_size=1234");
+  EXPECT_EQ(1234, options->buffer_size());
 }
 
 }  // namespace shaka

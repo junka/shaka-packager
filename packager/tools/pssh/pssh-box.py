@@ -14,24 +14,17 @@ import os
 import struct
 import sys
 
-# Append the local protobuf location.  Use a path relative to the tools/pssh
-# folder where this file should be found.  This allows the file to be executed
-# from any directory.
-_pssh_dir = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, os.path.join(_pssh_dir, '../../third_party/protobuf/python'))
-# Import the widevine protobuf.  Use either Release or Debug.
-_proto_path_format = os.path.join(
-    _pssh_dir, '../../../out/%s/pyproto/packager/media/base')
-if os.path.isdir(_proto_path_format % 'Release'):
-  sys.path.insert(0, _proto_path_format % 'Release')
-else:
-  sys.path.insert(0, _proto_path_format % 'Debug')
-try:
-  import widevine_pssh_data_pb2  # pylint: disable=g-import-not-at-top
-except ImportError:
-  print >> sys.stderr, 'Cannot find proto file, make sure to build first'
-  raise
+_script_dir = os.path.dirname(os.path.realpath(__file__))
+_proto_path = os.path.join(_script_dir, 'pyproto')
+_widevine_proto_path = os.path.join(_proto_path, 'packager/media/base')
 
+assert os.path.exists(_proto_path), (
+    'Please run from output directory, e.g. out/Debug/pssh-box.py')
+
+sys.path.insert(0, _proto_path)
+sys.path.insert(0, _widevine_proto_path)
+
+import widevine_pssh_data_pb2  # pylint: disable=g-import-not-at-top
 
 COMMON_SYSTEM_ID = base64.b16decode('1077EFECC0B24D02ACE33C1E52E2FB4B')
 WIDEVINE_SYSTEM_ID = base64.b16decode('EDEF8BA979D64ACEA3C827DCD51D21ED')
@@ -162,8 +155,10 @@ def _generate_widevine_data(key_ids, content_id, provider, protection_scheme):
   """Generate widevine pssh data."""
   wv = widevine_pssh_data_pb2.WidevinePsshData()
   wv.key_id.extend(key_ids)
-  wv.provider = provider or ''
-  wv.content_id = content_id
+  if provider:
+    wv.provider = provider
+  if content_id:
+    wv.content_id = content_id
   # 'cenc' is the default, so omitted to save bytes.
   if protection_scheme and protection_scheme != 'cenc':
     wv.protection_scheme = struct.unpack('>L', protection_scheme)[0]
@@ -404,16 +399,22 @@ def main(all_args):
     if ns.content_id:
       if ns.system_id != WIDEVINE_SYSTEM_ID:
         raise Exception('--content-id only valid with Widevine system ID')
-      pssh_data = _generate_widevine_data(ns.key_id, ns.content_id, ns.provider,
-                                          ns.protection_scheme)
 
     # Ignore if we have no data.
     if not pssh_data and not ns.key_id and not ns.system_id:
       continue
     if not ns.system_id:
       raise Exception('System ID is required')
-
-    version = 1 if ns.key_id and not ns.content_id else 0
+    if ns.system_id == WIDEVINE_SYSTEM_ID:
+      # Always generate version 0 for Widevine for backward compatibility.
+      version = 0
+      if not pssh_data:
+        if not ns.key_id and not ns.content_id:
+          raise Exception('Widevine system needs key-id or content-id or both')
+        pssh_data = _generate_widevine_data(ns.key_id, ns.content_id,
+                                            ns.provider, ns.protection_scheme)
+    else:
+      version = 1 if ns.key_id else 0
     boxes.append(Pssh(version, ns.system_id, ns.key_id, pssh_data))
 
   if output_format == 'human' or not output_format:

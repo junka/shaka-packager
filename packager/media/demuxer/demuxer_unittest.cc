@@ -9,8 +9,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "packager/media/base/fixed_key_source.h"
 #include "packager/media/base/media_handler_test_base.h"
+#include "packager/media/base/raw_key_source.h"
 #include "packager/media/test/test_data_util.h"
 #include "packager/status_test_util.h"
 
@@ -22,14 +22,14 @@ using ::testing::_;
 using ::testing::Return;
 using ::testing::SetArgPointee;
 
-class MockKeySource : public FixedKeySource {
+class MockKeySource : public RawKeySource {
  public:
   MOCK_METHOD2(GetKey,
                Status(const std::vector<uint8_t>& key_id, EncryptionKey* key));
 };
 }  // namespace
 
-class DemuxerTest : public MediaHandlerTestBase {
+class DemuxerTest : public MediaHandlerGraphTestBase {
  protected:
   EncryptionKey GetMockEncryptionKey() {
     const uint8_t kKeyId[]{
@@ -53,8 +53,8 @@ TEST_F(DemuxerTest, FileNotFound) {
 }
 
 TEST_F(DemuxerTest, EncryptedContentWithoutKeySource) {
-  Demuxer demuxer(
-      GetAppTestDataFilePath("bear-640x360-v-cenc-golden.mp4").AsUTF8Unsafe());
+  Demuxer demuxer(GetAppTestDataFilePath("encryption/bear-640x360-video.mp4")
+                      .AsUTF8Unsafe());
   ASSERT_OK(demuxer.SetHandler("video", some_handler()));
   EXPECT_EQ(error::INVALID_ARGUMENT, demuxer.Run().error_code());
 }
@@ -65,8 +65,8 @@ TEST_F(DemuxerTest, EncryptedContentWithKeySource) {
       .WillOnce(
           DoAll(SetArgPointee<1>(GetMockEncryptionKey()), Return(Status::OK)));
 
-  Demuxer demuxer(
-      GetAppTestDataFilePath("bear-640x360-v-cenc-golden.mp4").AsUTF8Unsafe());
+  Demuxer demuxer(GetAppTestDataFilePath("encryption/bear-640x360-video.mp4")
+                      .AsUTF8Unsafe());
   demuxer.SetKeySource(std::move(mock_key_source));
   ASSERT_OK(demuxer.SetHandler("video", some_handler()));
   EXPECT_OK(demuxer.Run());

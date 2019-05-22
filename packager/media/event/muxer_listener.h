@@ -6,8 +6,8 @@
 //
 // Event handler for events fired by Muxer.
 
-#ifndef MEDIA_EVENT_MUXER_LISTENER_H_
-#define MEDIA_EVENT_MUXER_LISTENER_H_
+#ifndef PACKAGER_MEDIA_EVENT_MUXER_LISTENER_H_
+#define PACKAGER_MEDIA_EVENT_MUXER_LISTENER_H_
 
 #include <stdint.h>
 
@@ -22,7 +22,7 @@ namespace shaka {
 namespace media {
 
 struct MuxerOptions;
-class ProtectionSystemSpecificInfo;
+struct ProtectionSystemSpecificInfo;
 class StreamInfo;
 
 /// MuxerListener is an event handler that can be registered to a muxer.
@@ -35,7 +35,9 @@ class MuxerListener {
     kContainerUnknown = 0,
     kContainerMp4,
     kContainerMpeg2ts,
-    kContainerWebM
+    kContainerWebM,
+    kContainerText,
+    kContainerPackedAudio,
   };
 
   /// Structure for specifying ranges within a media file. This is mainly for
@@ -52,7 +54,7 @@ class MuxerListener {
     std::vector<Range> subsegment_ranges;
   };
 
-  virtual ~MuxerListener() {};
+  virtual ~MuxerListener() = default;
 
   /// Called when the media's encryption information is ready.
   /// OnEncryptionInfoReady with @a initial_encryption_info being true should be
@@ -123,15 +125,29 @@ class MuxerListener {
   ///        specified by MediaInfo passed to OnMediaStart().
   /// @param segment_file_size is the segment size in bytes.
   virtual void OnNewSegment(const std::string& segment_name,
-                            uint64_t start_time,
-                            uint64_t duration,
+                            int64_t start_time,
+                            int64_t duration,
                             uint64_t segment_file_size) = 0;
 
+  /// Called when there is a new key frame. For Video only. Note that it should
+  /// be called before OnNewSegment is called on the containing segment.
+  /// @param timestamp is in terms of the timescale of the media.
+  /// @param start_byte_offset is the offset of where the key frame starts.
+  /// @param size is size in bytes.
+  virtual void OnKeyFrame(int64_t timestamp,
+                          uint64_t start_byte_offset,
+                          uint64_t size) = 0;
+
+  /// Called when there is a new Ad Cue, which should align with (sub)segments.
+  /// @param timestamp indicate the cue timestamp.
+  /// @param cue_data is the data of the cue.
+  virtual void OnCueEvent(int64_t timestamp, const std::string& cue_data) = 0;
+
  protected:
-  MuxerListener() {};
+  MuxerListener() = default;
 };
 
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_EVENT_MUXER_LISTENER_H_
+#endif  // PACKAGER_MEDIA_EVENT_MUXER_LISTENER_H_

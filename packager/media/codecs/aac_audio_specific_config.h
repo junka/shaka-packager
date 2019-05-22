@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef MEDIA_CODECS_AAC_AUDIO_SPECIFIC_CONFIG_H_
-#define MEDIA_CODECS_AAC_AUDIO_SPECIFIC_CONFIG_H_
+#ifndef PACKAGER_MEDIA_CODECS_AAC_AUDIO_SPECIFIC_CONFIG_H_
+#define PACKAGER_MEDIA_CODECS_AAC_AUDIO_SPECIFIC_CONFIG_H_
 
 #include <stddef.h>
 #include <stdint.h>
@@ -111,9 +111,13 @@ class AACAudioSpecificConfig {
   void set_sbr_present(bool sbr_present) { sbr_present_ = sbr_present; }
 
  private:
-  bool SkipDecoderGASpecificConfig(BitReader* bit_reader) const;
+  bool ParseDecoderGASpecificConfig(BitReader* bit_reader);
   bool SkipErrorSpecificConfig() const;
-  bool SkipGASpecificConfig(BitReader* bit_reader) const;
+  // Parse GASpecificConfig. Calls |ParseProgramConfigElement| if
+  // |channel_config_| == 0.
+  bool ParseGASpecificConfig(BitReader* bit_reader);
+  // Parse program_config_element(). |num_channels_| will be updated.
+  bool ParseProgramConfigElement(BitReader* bit_reader);
 
   // The following variables store the AAC specific configuration information
   // that are used to generate the ADTS header.
@@ -136,4 +140,4 @@ class AACAudioSpecificConfig {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_CODECS_AAC_AUDIO_SPECIFIC_CONFIG_H_
+#endif  // PACKAGER_MEDIA_CODECS_AAC_AUDIO_SPECIFIC_CONFIG_H_

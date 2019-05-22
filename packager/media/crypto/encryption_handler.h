@@ -9,38 +9,19 @@
 
 #include "packager/media/base/key_source.h"
 #include "packager/media/base/media_handler.h"
-#include "packager/packager.h"
+#include "packager/media/public/crypto_params.h"
 
 namespace shaka {
 namespace media {
 
 class AesCryptor;
-class VideoSliceHeaderParser;
-class VPxParser;
+class AesEncryptorFactory;
+class SubsampleGenerator;
 struct EncryptionKey;
-struct VPxFrameInfo;
-
-/// This structure defines encryption options.
-struct EncryptionOptions {
-  /// Clear lead duration in seconds.
-  double clear_lead_in_seconds = 0;
-  /// The protection scheme: 'cenc', 'cens', 'cbc1', 'cbcs'.
-  FourCC protection_scheme = FOURCC_cenc;
-  /// Crypto period duration in seconds. A positive value means key rotation is
-  /// enabled, the key source must support key rotation in this case.
-  double crypto_period_duration_in_seconds = 0;
-  /// Enable/disable subsample encryption for VP9.
-  bool vp9_subsample_encryption = true;
-  /// Stream label function used to get the label of the encrypted stream. Must
-  /// be set.
-  std::function<std::string(
-      const EncryptionParams::EncryptedStreamAttributes& stream_attributes)>
-      stream_label_func;
-};
 
 class EncryptionHandler : public MediaHandler {
  public:
-  EncryptionHandler(const EncryptionOptions& encryption_options,
+  EncryptionHandler(const EncryptionParams& encryption_params,
                     KeySource* key_source);
 
   ~EncryptionHandler() override;
@@ -59,37 +40,42 @@ class EncryptionHandler : public MediaHandler {
   EncryptionHandler& operator=(const EncryptionHandler&) = delete;
 
   // Processes |stream_info| and sets up stream specific variables.
-  Status ProcessStreamInfo(StreamInfo* stream_info);
+  Status ProcessStreamInfo(const StreamInfo& stream_info);
   // Processes media sample and encrypts it if needed.
-  Status ProcessMediaSample(MediaSample* sample);
+  Status ProcessMediaSample(std::shared_ptr<const MediaSample> clear_sample);
 
-  Status SetupProtectionPattern(StreamType stream_type);
+  void SetupProtectionPattern(StreamType stream_type);
   bool CreateEncryptor(const EncryptionKey& encryption_key);
-  bool EncryptVpxFrame(const std::vector<VPxFrameInfo>& vpx_frames,
-                       MediaSample* sample,
-                       DecryptConfig* decrypt_config);
-  bool EncryptNalFrame(MediaSample* sample, DecryptConfig* decrypt_config);
-  void EncryptBytes(uint8_t* data, size_t size);
+  // Encrypt an E-AC3 frame with size |source_size| according to SAMPLE-AES
+  // specification. |dest| should have at least |source_size| bytes.
+  bool SampleAesEncryptEac3Frame(const uint8_t* source,
+                                 size_t source_size,
+                                 uint8_t* dest);
+  // Encrypt an array with size |source_size|. |dest| should have at
+  // least |source_size| bytes.
+  void EncryptBytes(const uint8_t* source, size_t source_size, uint8_t* dest);
+
+  // An E-AC3 frame comprises of one or more syncframes. This function extracts
+  // the syncframe sizes from the source bytes.
+  // Returns false if the frame is not well formed.
+  bool ExtractEac3SyncframeSizes(const uint8_t* source,
+                                 size_t source_size,
+                                 std::vector<size_t>* syncframe_sizes);
 
   // Testing injections.
-  void InjectVpxParserForTesting(std::unique_ptr<VPxParser> vpx_parser);
-  void InjectVideoSliceHeaderParserForTesting(
-      std::unique_ptr<VideoSliceHeaderParser> header_parser);
+  void InjectSubsampleGeneratorForTesting(
+      std::unique_ptr<SubsampleGenerator> generator);
+  void InjectEncryptorFactoryForTesting(
+      std::unique_ptr<AesEncryptorFactory> encryptor_factory);
 
-  const EncryptionOptions encryption_options_;
+  const EncryptionParams encryption_params_;
+  const FourCC protection_scheme_ = FOURCC_NULL;
   KeySource* key_source_ = nullptr;
   std::string stream_label_;
   // Current encryption config and encryptor.
   std::shared_ptr<EncryptionConfig> encryption_config_;
   std::unique_ptr<AesCryptor> encryptor_;
   Codec codec_ = kUnknownCodec;
-  // Specifies the size of NAL unit length in bytes. Can be 1, 2 or 4 bytes. 0
-  // if it is not a NAL structured video.
-  uint8_t nalu_length_size_ = 0;
-  // For Sample AES, 32 bytes for Video and 16 bytes for audio.
-  size_t leading_clear_bytes_size_ = 0;
-  // For Sample AES, 48+1 bytes for video NAL and 16+1 bytes for audio.
-  size_t min_protected_data_size_ = 0;
   // Remaining clear lead in the stream's time scale.
   int64_t remaining_clear_lead_ = 0;
   // Crypto period duration in the stream's time scale.
@@ -98,15 +84,12 @@ class EncryptionHandler : public MediaHandler {
   int64_t prev_crypto_period_index_ = -1;
   bool check_new_crypto_period_ = false;
 
+  std::unique_ptr<SubsampleGenerator> subsample_generator_;
+  std::unique_ptr<AesEncryptorFactory> encryptor_factory_;
   // Number of encrypted blocks (16-byte-block) in pattern based encryption.
   uint8_t crypt_byte_block_ = 0;
   /// Number of unencrypted blocks (16-byte-block) in pattern based encryption.
   uint8_t skip_byte_block_ = 0;
-
-  // VPx parser for VPx streams.
-  std::unique_ptr<VPxParser> vpx_parser_;
-  // Video slice header parser for NAL strucutred streams.
-  std::unique_ptr<VideoSliceHeaderParser> header_parser_;
 };
 
 }  // namespace media

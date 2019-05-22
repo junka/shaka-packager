@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #define INVALID_SOCKET -1
 
@@ -204,28 +205,54 @@ bool UdpFile::Open() {
   }
 
   if (is_multicast) {
-    struct ip_mreq multicast_group;
-    multicast_group.imr_multiaddr = local_in_addr;
+    if (options->is_source_specific_multicast()) {
+      struct ip_mreq_source source_multicast_group;
 
-    if (options->interface_address().empty()) {
-      LOG(ERROR) << "Interface address is required for multicast, which can be "
-                    "specified in udp url, e.g. "
-                    "udp://ip:port?interface=interface_ip.";
-      return false;
-    }
-    if (inet_pton(AF_INET, options->interface_address().c_str(),
-                  &multicast_group.imr_interface) != 1) {
-      LOG(ERROR) << "Malformed IPv4 interface address "
-                 << options->interface_address();
-      return false;
-    }
+      source_multicast_group.imr_multiaddr = local_in_addr;
+      if (inet_pton(AF_INET,
+                    options->interface_address().c_str(),
+                    &source_multicast_group.imr_interface) != 1) {
+        LOG(ERROR) << "Malformed IPv4 interface address "
+                   << options->interface_address();
+        return false;
+      }
+      if (inet_pton(AF_INET,
+                    options->source_address().c_str(),
+                    &source_multicast_group.imr_sourceaddr) != 1) {
+        LOG(ERROR) << "Malformed IPv4 source specific multicast address "
+                   << options->source_address();
+        return false;
+      }
 
-    if (setsockopt(new_socket.get(), IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                   reinterpret_cast<const char*>(&multicast_group),
-                   sizeof(multicast_group)) < 0) {
-      LOG(ERROR) << "Failed to join multicast group.";
-      return false;
-    }
+      if (setsockopt(new_socket.get(),
+                     IPPROTO_IP,
+                     IP_ADD_SOURCE_MEMBERSHIP,
+                     reinterpret_cast<const char*>(&source_multicast_group),
+                     sizeof(source_multicast_group)) < 0) {
+          LOG(ERROR) << "Failed to join multicast group.";
+          return false;
+      }
+    } else {
+      // this is a v2 join without a specific source.
+      struct ip_mreq multicast_group;
+
+      multicast_group.imr_multiaddr = local_in_addr;
+
+      if (inet_pton(AF_INET, options->interface_address().c_str(),
+                    &multicast_group.imr_interface) != 1) {
+        LOG(ERROR) << "Malformed IPv4 interface address "
+                   << options->interface_address();
+        return false;
+      }
+
+      if (setsockopt(new_socket.get(), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                    reinterpret_cast<const char*>(&multicast_group),
+                    sizeof(multicast_group)) < 0) {
+        LOG(ERROR) << "Failed to join multicast group.";
+        return false;
+      }
+
+  }
 
 #if defined(__linux__)
     // Disable IP_MULTICAST_ALL to avoid interference caused when two sockets
@@ -247,8 +274,19 @@ bool UdpFile::Open() {
     tv.tv_sec = options->timeout_us() / 1000000;
     tv.tv_usec = options->timeout_us() % 1000000;
     if (setsockopt(new_socket.get(), SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<char*>(&tv), sizeof(tv)) < 0) {
+                   reinterpret_cast<const char*>(&tv), sizeof(tv)) < 0) {
       LOG(ERROR) << "Failed to set socket timeout.";
+      return false;
+    }
+  }
+
+  if (options->buffer_size() > 0) {
+    const int receive_buffer_size = options->buffer_size();
+    if (setsockopt(new_socket.get(), SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&receive_buffer_size),
+                   sizeof(receive_buffer_size)) < 0) {
+      LOG(ERROR) << "Failed to set the maximum receive buffer size: "
+                 << strerror(errno);
       return false;
     }
   }

@@ -5,35 +5,42 @@
 # https://developers.google.com/open-source/licenses/bsd
 
 {
-  'includes': [
-    'common.gypi',
-  ],
+  'variables': {
+    'shaka_code': 1,
+  },
   'targets': [
     {
       'target_name': 'libpackager',
       'type': '<(libpackager_type)',
       'sources': [
-        'packager.cc',
-        'packager.h',
         # TODO(kqyang): Clean up the file path.
+        'app/job_manager.cc',
+        'app/job_manager.h',
+        'app/muxer_factory.cc',
+        'app/muxer_factory.h',
         'app/libcrypto_threading.cc',
         'app/libcrypto_threading.h',
         'app/packager_util.cc',
         'app/packager_util.h',
+        'packager.cc',
+        'packager.h',
       ],
       'dependencies': [
         'file/file.gyp:file',
         'hls/hls.gyp:hls_builder',
-        'media/codecs/codecs.gyp:codecs',
         'media/chunking/chunking.gyp:chunking',
+        'media/codecs/codecs.gyp:codecs',
+        'media/crypto/crypto.gyp:crypto',
         'media/demuxer/demuxer.gyp:demuxer',
         'media/event/media_event.gyp:media_event',
         'media/formats/mp2t/mp2t.gyp:mp2t',
         'media/formats/mp4/mp4.gyp:mp4',
-        'media/formats/mpeg/mpeg.gyp:mpeg',
+        'media/formats/packed_audio/packed_audio.gyp:packed_audio',
         'media/formats/webm/webm.gyp:webm',
         'media/formats/webvtt/webvtt.gyp:webvtt',
         'media/formats/wvm/wvm.gyp:wvm',
+        'media/public/public.gyp:public',
+        'media/replicator/replicator.gyp:replicator',
         'media/trick_play/trick_play.gyp:trick_play',
         'mpd/mpd.gyp:mpd_builder',
         'third_party/boringssl/boringssl.gyp:boringssl',
@@ -55,14 +62,16 @@
       'target_name': 'packager',
       'type': 'executable',
       'sources': [
+        'app/ad_cue_generator_flags.cc',
+        'app/ad_cue_generator_flags.h',
         'app/crypto_flags.cc',
         'app/crypto_flags.h',
-        'app/fixed_key_encryption_flags.cc',
-        'app/fixed_key_encryption_flags.h',
         'app/gflags_hex_bytes.cc',
         'app/gflags_hex_bytes.h',
         'app/hls_flags.cc',
         'app/hls_flags.h',
+        'app/manifest_flags.cc',
+        'app/manifest_flags.h',
         'app/mpd_flags.cc',
         'app/mpd_flags.h',
         'app/muxer_flags.cc',
@@ -70,6 +79,10 @@
         'app/packager_main.cc',
         'app/playready_key_encryption_flags.cc',
         'app/playready_key_encryption_flags.h',
+        'app/raw_key_encryption_flags.cc',
+        'app/raw_key_encryption_flags.h',
+        'app/protection_system_flags.cc',
+        'app/protection_system_flags.h',
         'app/retired_flags.cc',
         'app/retired_flags.h',
         'app/stream_descriptor.cc',
@@ -86,6 +99,7 @@
         'file/file.gyp:file',
         'libpackager',
         'third_party/gflags/gflags.gyp:gflags',
+        'tools/license_notice.gyp:license_notice',
       ],
       'conditions': [
         ['profiling==1', {
@@ -108,6 +122,7 @@
         'base/base.gyp:base',
         'mpd/mpd.gyp:mpd_util',
         'third_party/gflags/gflags.gyp:gflags',
+        'tools/license_notice.gyp:license_notice',
       ],
     },
     {
@@ -117,8 +132,8 @@
         'packager_test.cc',
       ],
       'dependencies': [
-        'base/base.gyp:base',
         'libpackager',
+        'testing/gmock.gyp:gmock',
         'testing/gtest.gyp:gtest',
         'testing/gtest.gyp:gtest_main',
       ],
@@ -137,11 +152,26 @@
       'dependencies': ['packager'],
     },
     {
+      'target_name': 'pssh_box_py',
+      'type': 'none',
+      'copies': [{
+        'destination': '<(PRODUCT_DIR)',
+        'files': [
+          'tools/pssh/pssh-box.py',
+        ],
+      }],
+      'dependencies': [
+        'media/base/media_base.gyp:widevine_pssh_data_proto',
+        'third_party/protobuf/protobuf.gyp:py_proto',
+      ],
+    },
+    {
       'target_name': 'status',
       'type': '<(component)',
       'sources': [
         'status.cc',
         'status.h',
+        'status_macros.h',
       ],
       'dependencies': [
         'base/base.gyp:base',
@@ -182,6 +212,7 @@
         'media/event/media_event.gyp:media_event_unittest',
         'media/formats/mp2t/mp2t.gyp:mp2t_unittest',
         'media/formats/mp4/mp4.gyp:mp4_unittest',
+        'media/formats/packed_audio/packed_audio.gyp:packed_audio_unittest',
         'media/formats/webm/webm.gyp:webm_unittest',
         'media/formats/webvtt/webvtt.gyp:webvtt_unittest',
         'media/formats/wvm/wvm.gyp:wvm_unittest',

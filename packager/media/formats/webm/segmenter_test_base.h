@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_FORMATS_WEBM_SEGMENTER_TEST_UTILS_H_
-#define MEDIA_FORMATS_WEBM_SEGMENTER_TEST_UTILS_H_
+#ifndef PACKAGER_MEDIA_FORMATS_WEBM_SEGMENTER_TEST_UTILS_H_
+#define PACKAGER_MEDIA_FORMATS_WEBM_SEGMENTER_TEST_UTILS_H_
 
 #include <gtest/gtest.h>
 
@@ -46,7 +46,7 @@ class SegmentTestBase : public ::testing::Test {
   template <typename S>
   void CreateAndInitializeSegmenter(
       const MuxerOptions& options,
-      StreamInfo* info,
+      const StreamInfo& info,
       std::unique_ptr<webm::Segmenter>* result) const {
     std::unique_ptr<S> segmenter(new S(options));
 
@@ -114,4 +114,4 @@ class SegmentTestBase : public ::testing::Test {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_FORMATS_WEBM_SEGMENTER_TEST_UTILS_H_
+#endif  // PACKAGER_MEDIA_FORMATS_WEBM_SEGMENTER_TEST_UTILS_H_

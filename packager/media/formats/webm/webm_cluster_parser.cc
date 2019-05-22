@@ -376,21 +376,34 @@ bool WebMClusterParser::OnBlock(bool is_simple_block,
       return false;
     }
 
-    buffer = MediaSample::CopyFrom(data + data_offset, size - data_offset,
-                                   additional, additional_size, is_key_frame);
+    const uint8_t* media_data = data + data_offset;
+    const size_t media_data_size = size - data_offset;
+    // Use a dummy data size of 0 to avoid copying overhead.
+    // Actual media data is set later.
+    const size_t kDummyDataSize = 0;
+    buffer = MediaSample::CopyFrom(media_data, kDummyDataSize, additional,
+                                   additional_size, is_key_frame);
 
     if (decrypt_config) {
       if (!decryptor_source_) {
+        buffer->SetData(media_data, media_data_size);
         // If the demuxer does not have the decryptor_source_, store
         // decrypt_config so that the demuxed sample can be decrypted later.
         buffer->set_decrypt_config(std::move(decrypt_config));
         buffer->set_is_encrypted(true);
-      } else if (!decryptor_source_->DecryptSampleBuffer(
-                     decrypt_config.get(), buffer->writable_data(),
-                     buffer->data_size())) {
-        LOG(ERROR) << "Cannot decrypt samples";
-        return false;
+      } else {
+        std::shared_ptr<uint8_t> decrypted_media_data(
+            new uint8_t[media_data_size], std::default_delete<uint8_t[]>());
+        if (!decryptor_source_->DecryptSampleBuffer(
+                decrypt_config.get(), media_data, media_data_size,
+                decrypted_media_data.get())) {
+          LOG(ERROR) << "Cannot decrypt samples";
+          return false;
+        }
+        buffer->TransferData(std::move(decrypted_media_data), media_data_size);
       }
+    } else {
+      buffer->SetData(media_data, media_data_size);
     }
   } else {
     std::string id, settings, content;
@@ -420,36 +433,42 @@ bool WebMClusterParser::OnBlock(bool is_simple_block,
       streams.push_back(audio_stream_info_);
     if (video_stream_info_) {
       if (stream_type == kStreamVideo) {
-        std::unique_ptr<VPxParser> vpx_parser;
-        switch (video_stream_info_->codec()) {
-          case kCodecVP8:
-            vpx_parser.reset(new VP8Parser);
-            break;
-          case kCodecVP9:
-            vpx_parser.reset(new VP9Parser);
-            break;
-          default:
-            NOTIMPLEMENTED() << "Unsupported codec "
-                             << video_stream_info_->codec();
+        // Setup codec string and codec config for VP8 and VP9.
+        // Codec config for AV1 is already retrieved from WebM CodecPrivate
+        // instead of extracted from the bit stream.
+        if (video_stream_info_->codec() != kCodecAV1) {
+          std::unique_ptr<VPxParser> vpx_parser;
+          switch (video_stream_info_->codec()) {
+            case kCodecVP8:
+              vpx_parser.reset(new VP8Parser);
+              break;
+            case kCodecVP9:
+              vpx_parser.reset(new VP9Parser);
+              break;
+            default:
+              NOTIMPLEMENTED()
+                  << "Unsupported codec " << video_stream_info_->codec();
+              return false;
+          }
+          std::vector<VPxFrameInfo> vpx_frames;
+          if (!vpx_parser->Parse(buffer->data(), buffer->data_size(),
+                                 &vpx_frames)) {
+            LOG(ERROR) << "Failed to parse vpx frame.";
             return false;
-        }
-        std::vector<VPxFrameInfo> vpx_frames;
-        if (!vpx_parser->Parse(buffer->data(), buffer->data_size(),
-                               &vpx_frames)) {
-          LOG(ERROR) << "Failed to parse vpx frame.";
-          return false;
-        }
-        if (vpx_frames.size() != 1u || !vpx_frames[0].is_keyframe) {
-          LOG(ERROR) << "The first frame should be a key frame.";
-          return false;
+          }
+          if (vpx_frames.size() != 1u || !vpx_frames[0].is_keyframe) {
+            LOG(ERROR) << "The first frame should be a key frame.";
+            return false;
+          }
+
+          vp_config_.MergeFrom(vpx_parser->codec_config());
+          video_stream_info_->set_codec_string(
+              vp_config_.GetCodecString(video_stream_info_->codec()));
+          std::vector<uint8_t> config_serialized;
+          vp_config_.WriteMP4(&config_serialized);
+          video_stream_info_->set_codec_config(config_serialized);
         }
 
-        vp_config_.MergeFrom(vpx_parser->codec_config());
-        video_stream_info_->set_codec_string(
-            vp_config_.GetCodecString(video_stream_info_->codec()));
-        std::vector<uint8_t> config_serialized;
-        vp_config_.WriteMP4(&config_serialized);
-        video_stream_info_->set_codec_config(config_serialized);
         streams.push_back(video_stream_info_);
         init_cb_.Run(streams);
         initialized_ = true;

@@ -15,19 +15,14 @@
 
 DEFINE_bool(enable_widevine_encryption,
             false,
-            "Enable encryption with Widevine license server/proxy. User should "
-            "provide either AES signing key (--aes_signing_key, "
-            "--aes_signing_iv) or RSA signing key (--rsa_signing_key_path).");
+            "Enable encryption with Widevine key server. User should provide "
+            "either AES signing key (--aes_signing_key, --aes_signing_iv) or "
+            "RSA signing key (--rsa_signing_key_path).");
 DEFINE_bool(enable_widevine_decryption,
             false,
             "Enable decryption with Widevine license server/proxy. User should "
             "provide either AES signing key (--aes_signing_key, "
             "--aes_signing_iv) or RSA signing key (--rsa_signing_key_path).");
-DEFINE_bool(include_common_pssh,
-            false,
-            "When using Widevine encryption, include an additional v1 PSSH box "
-            "for the common system ID that includes the key IDs. See: "
-            "https://goo.gl/s8RIhr");
 DEFINE_string(key_server_url, "", "Key server url. Required for encryption and "
               "decryption");
 DEFINE_hex_bytes(content_id, "", "Content Id (hex).");
@@ -64,6 +59,9 @@ DEFINE_int32(crypto_period_duration,
              "Crypto period duration in seconds. If it is non-zero, key "
              "rotation is enabled.");
 DEFINE_hex_bytes(group_id, "", "Identifier for a group of licenses (hex).");
+DEFINE_bool(enable_entitlement_license,
+            false,
+            "Enable entitlement license when using Widevine key server.");
 
 namespace shaka {
 namespace {
@@ -115,11 +113,6 @@ bool ValidateWidevineCryptoFlags() {
                     FLAGS_enable_widevine_encryption,
                     kOptional,
                     widevine_encryption_label)) {
-    success = false;
-  }
-  if (FLAGS_include_common_pssh && !FLAGS_enable_widevine_encryption) {
-    PrintError("--include_common_pssh is only valid with "
-               "--enable_widevine_encryption");
     success = false;
   }
 

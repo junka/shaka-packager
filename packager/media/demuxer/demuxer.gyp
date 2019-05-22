@@ -5,9 +5,9 @@
 # https://developers.google.com/open-source/licenses/bsd
 
 {
-  'includes': [
-    '../../common.gypi',
-  ],
+  'variables': {
+    'shaka_code': 1,
+  },
   'targets': [
     {
       'target_name': 'demuxer',
@@ -20,10 +20,10 @@
         '../base/media_base.gyp:media_base',
         '../formats/mp2t/mp2t.gyp:mp2t',
         '../formats/mp4/mp4.gyp:mp4',
-        '../formats/mpeg/mpeg.gyp:mpeg',
         '../formats/webm/webm.gyp:webm',
         '../formats/webvtt/webvtt.gyp:webvtt',
         '../formats/wvm/wvm.gyp:wvm',
+        '../origin/origin.gyp:origin',
       ],
     },
     {

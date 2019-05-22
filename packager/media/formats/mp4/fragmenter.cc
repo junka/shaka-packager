@@ -6,12 +6,15 @@
 
 #include "packager/media/formats/mp4/fragmenter.h"
 
+#include <algorithm>
 #include <limits>
 
-#include "packager/media/base/buffer_writer.h"
 #include "packager/media/base/audio_stream_info.h"
+#include "packager/media/base/buffer_writer.h"
 #include "packager/media/base/media_sample.h"
 #include "packager/media/formats/mp4/box_definitions.h"
+#include "packager/media/formats/mp4/key_frame_info.h"
+#include "packager/status_macros.h"
 
 namespace shaka {
 namespace media {
@@ -20,7 +23,7 @@ namespace mp4 {
 namespace {
 const int64_t kInvalidTime = std::numeric_limits<int64_t>::max();
 
-uint64_t GetSeekPreroll(const StreamInfo& stream_info) {
+int64_t GetSeekPreroll(const StreamInfo& stream_info) {
   if (stream_info.stream_type() != kStreamAudio)
     return 0;
   const AudioStreamInfo& audio_stream_info =
@@ -44,15 +47,13 @@ void NewSampleEncryptionEntry(const DecryptConfig& decrypt_config,
 
 }  // namespace
 
-Fragmenter::Fragmenter(std::shared_ptr<StreamInfo> stream_info,
-                       TrackFragment* traf)
+Fragmenter::Fragmenter(std::shared_ptr<const StreamInfo> stream_info,
+                       TrackFragment* traf,
+                       int64_t edit_list_offset)
     : stream_info_(std::move(stream_info)),
-      use_decoding_timestamp_in_timeline_(false),
       traf_(traf),
+      edit_list_offset_(edit_list_offset),
       seek_preroll_(GetSeekPreroll(*stream_info_)),
-      fragment_initialized_(false),
-      fragment_finalized_(false),
-      fragment_duration_(0),
       earliest_presentation_time_(kInvalidTime),
       first_sap_time_(kInvalidTime) {
   DCHECK(stream_info_);
@@ -61,54 +62,66 @@ Fragmenter::Fragmenter(std::shared_ptr<StreamInfo> stream_info,
 
 Fragmenter::~Fragmenter() {}
 
-Status Fragmenter::AddSample(std::shared_ptr<MediaSample> sample) {
-  DCHECK(sample);
-  if (sample->duration() == 0) {
-    LOG(WARNING) << "Unexpected sample with zero duration @ dts "
-                 << sample->dts();
-  }
+Status Fragmenter::AddSample(const MediaSample& sample) {
+  const int64_t pts = sample.pts();
+  const int64_t dts = sample.dts();
+  const int64_t duration = sample.duration();
+  if (duration == 0)
+    LOG(WARNING) << "Unexpected sample with zero duration @ dts " << dts;
 
-  if (!fragment_initialized_) {
-    Status status = InitializeFragment(sample->dts());
-    if (!status.ok())
-      return status;
-  }
+  if (!fragment_initialized_)
+    RETURN_IF_ERROR(InitializeFragment(dts));
 
-  if (sample->side_data_size() > 0)
+  if (sample.side_data_size() > 0)
     LOG(WARNING) << "MP4 samples do not support side data. Side data ignored.";
 
   // Fill in sample parameters. It will be optimized later.
   traf_->runs[0].sample_sizes.push_back(
-      static_cast<uint32_t>(sample->data_size()));
-  traf_->runs[0].sample_durations.push_back(sample->duration());
+      static_cast<uint32_t>(sample.data_size()));
+  traf_->runs[0].sample_durations.push_back(duration);
   traf_->runs[0].sample_flags.push_back(
-      sample->is_key_frame() ? 0 : TrackFragmentHeader::kNonKeySampleMask);
+      sample.is_key_frame() ? 0 : TrackFragmentHeader::kNonKeySampleMask);
 
-  if (sample->decrypt_config()) {
+  if (sample.decrypt_config()) {
     NewSampleEncryptionEntry(
-        *sample->decrypt_config(),
+        *sample.decrypt_config(),
         !stream_info_->encryption_config().constant_iv.empty(), traf_);
   }
 
-  data_->AppendArray(sample->data(), sample->data_size());
-  fragment_duration_ += sample->duration();
+  if (stream_info_->stream_type() == StreamType::kStreamVideo &&
+      sample.is_key_frame()) {
+    key_frame_infos_.push_back(
+        {static_cast<uint64_t>(pts), data_->Size(), sample.data_size()});
+  }
 
-  const int64_t pts = sample->pts();
-  const int64_t dts = sample->dts();
-
-  const int64_t timestamp = use_decoding_timestamp_in_timeline_ ? dts : pts;
-  // Set |earliest_presentation_time_| to |timestamp| if |timestamp| is smaller
-  // or if it is not yet initialized (kInvalidTime > timestamp is always true).
-  if (earliest_presentation_time_ > timestamp)
-    earliest_presentation_time_ = timestamp;
+  data_->AppendArray(sample.data(), sample.data_size());
 
   traf_->runs[0].sample_composition_time_offsets.push_back(pts - dts);
   if (pts != dts)
     traf_->runs[0].flags |= TrackFragmentRun::kSampleCompTimeOffsetsPresentMask;
 
-  if (sample->is_key_frame()) {
-    if (first_sap_time_ == kInvalidTime)
-      first_sap_time_ = pts;
+  // Exclude the part of sample with negative pts out of duration calculation as
+  // they are not presented.
+  if (pts < 0) {
+    const int64_t end_pts = pts + duration;
+    if (end_pts > 0) {
+      // Include effective presentation duration.
+      fragment_duration_ += end_pts;
+
+      earliest_presentation_time_ = 0;
+      if (sample.is_key_frame())
+        first_sap_time_ = 0;
+    }
+  } else {
+    fragment_duration_ += duration;
+
+    if (earliest_presentation_time_ > pts)
+      earliest_presentation_time_ = pts;
+
+    if (sample.is_key_frame()) {
+      if (first_sap_time_ == kInvalidTime)
+        first_sap_time_ = pts;
+    }
   }
   return Status::OK;
 }
@@ -116,7 +129,13 @@ Status Fragmenter::AddSample(std::shared_ptr<MediaSample> sample) {
 Status Fragmenter::InitializeFragment(int64_t first_sample_dts) {
   fragment_initialized_ = true;
   fragment_finalized_ = false;
-  traf_->decode_time.decode_time = first_sample_dts;
+
+  // |first_sample_dts| is adjusted by the edit list offset. The offset should
+  // be un-applied in |decode_time|, so when applying the Edit List, the result
+  // dts is |first_sample_dts|.
+  const int64_t dts_before_edit = first_sample_dts + edit_list_offset_;
+  traf_->decode_time.decode_time = dts_before_edit;
+
   traf_->runs.clear();
   traf_->runs.resize(1);
   traf_->runs[0].flags = TrackFragmentRun::kDataOffsetPresentMask;
@@ -133,6 +152,7 @@ Status Fragmenter::InitializeFragment(int64_t first_sample_dts) {
   earliest_presentation_time_ = kInvalidTime;
   first_sap_time_ = kInvalidTime;
   data_.reset(new BufferWriter());
+  key_frame_infos_.clear();
   return Status::OK;
 }
 
@@ -201,7 +221,7 @@ Status Fragmenter::FinalizeFragment() {
   return Status::OK;
 }
 
-void Fragmenter::GenerateSegmentReference(SegmentReference* reference) {
+void Fragmenter::GenerateSegmentReference(SegmentReference* reference) const {
   // NOTE: Daisy chain is not supported currently.
   reference->reference_type = false;
   reference->subsegment_duration = fragment_duration_;
@@ -268,7 +288,7 @@ Status Fragmenter::FinalizeFragmentForEncryption() {
   return Status::OK;
 }
 
-bool Fragmenter::StartsWithSAP() {
+bool Fragmenter::StartsWithSAP() const {
   DCHECK(!traf_->runs.empty());
   uint32_t start_sample_flag;
   if (traf_->runs[0].flags & TrackFragmentRun::kSampleFlagsPresentMask) {

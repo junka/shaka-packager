@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "packager/hls/public/hls_playlist_type.h"
+#include "packager/hls/public/hls_params.h"
 #include "packager/mpd/base/media_info.pb.h"
 
 namespace shaka {
@@ -19,8 +19,7 @@ namespace hls {
 // TODO(rkuroiwa): Consider merging this with MpdNotifier.
 class HlsNotifier {
  public:
-  explicit HlsNotifier(HlsPlaylistType playlist_type)
-      : playlist_type_(playlist_type) {}
+  explicit HlsNotifier(const HlsParams& hls_params) : hls_params_(hls_params) {}
   virtual ~HlsNotifier() {}
 
   /// Intialize the notifier.
@@ -57,6 +56,22 @@ class HlsNotifier {
                                 uint64_t start_byte_offset,
                                 uint64_t size) = 0;
 
+  /// Called on every key frame. For Video only.
+  /// @param stream_id is the value set by NotifyNewStream().
+  /// @param timestamp is the timesamp of the key frame in timescale units
+  ///        passed in @a media_info.
+  /// @param start_byte_offset is the offset of where the keyframe starts.
+  /// @param size is the size in bytes.
+  virtual bool NotifyKeyFrame(uint32_t stream_id,
+                              uint64_t timestamp,
+                              uint64_t start_byte_offset,
+                              uint64_t size) = 0;
+
+  /// @param stream_id is the value set by NotifyNewStream().
+  /// @param timestamp is the timestamp of the CueEvent.
+  /// @return true on success, false otherwise.
+  virtual bool NotifyCueEvent(uint32_t stream_id, uint64_t timestamp) = 0;
+
   /// @param stream_id is the value set by NotifyNewStream().
   /// @param key_id is the key ID for the stream.
   /// @param system_id is the DRM system ID in e.g. PSSH boxes. For example this
@@ -76,11 +91,11 @@ class HlsNotifier {
   /// @return true on success, false otherwise.
   virtual bool Flush() = 0;
 
-  /// @return the playlist type.
-  HlsPlaylistType playlist_type() const { return playlist_type_; }
+  /// @return The HLS parameters.
+  const HlsParams& hls_params() const { return hls_params_; }
 
  private:
-  HlsPlaylistType playlist_type_;
+  const HlsParams hls_params_;
 };
 
 }  // namespace hls

@@ -14,12 +14,12 @@
 #include "packager/file/file.h"
 #include "packager/media/base/decryptor_source.h"
 #include "packager/media/base/key_source.h"
+#include "packager/media/base/macros.h"
 #include "packager/media/base/media_sample.h"
 #include "packager/media/base/stream_info.h"
 #include "packager/media/formats/mp2t/mp2t_media_parser.h"
 #include "packager/media/formats/mp4/mp4_media_parser.h"
 #include "packager/media/formats/webm/webm_media_parser.h"
-#include "packager/media/formats/webvtt/webvtt_media_parser.h"
 #include "packager/media/formats/wvm/wvm_media_parser.h"
 
 namespace {
@@ -186,17 +186,30 @@ Status Demuxer::InitializeParser() {
     case CONTAINER_MPEG2TS:
       parser_.reset(new mp2t::Mp2tMediaParser());
       break;
+      // Widevine classic (WVM) is derived from MPEG2PS. We do not support
+      // non-WVM MPEG2PS file, thus we do not differentiate between the two.
+      // Every MPEG2PS file is assumed to be WVM file. If it turns out not the
+      // case, an error will be reported when trying to parse the file as WVM
+      // file.
     case CONTAINER_MPEG2PS:
+      FALLTHROUGH_INTENDED;
+    case CONTAINER_WVM:
       parser_.reset(new wvm::WvmMediaParser());
       break;
     case CONTAINER_WEBM:
       parser_.reset(new WebMMediaParser());
       break;
-    case CONTAINER_WEBVTT:
-      parser_.reset(new WebVttMediaParser());
-      break;
+    case CONTAINER_UNKNOWN: {
+      const int64_t kDumpSizeLimit = 512;
+      LOG(ERROR) << "Failed to detect the container type from the buffer: "
+                 << base::HexEncode(buffer_.get(),
+                                    std::min(bytes_read, kDumpSizeLimit));
+      return Status(error::INVALID_ARGUMENT,
+                    "Failed to detect the container type.");
+    }
     default:
-      NOTIMPLEMENTED();
+      NOTIMPLEMENTED() << "Container " << container_name_
+                       << " is not supported.";
       return Status(error::UNIMPLEMENTED, "Container not supported.");
   }
 
@@ -261,9 +274,9 @@ void Demuxer::ParserInitEvent(
         stream_info->set_language(iter->second);
       }
       if (stream_info->is_encrypted()) {
-        init_event_status_.SetError(
-            error::INVALID_ARGUMENT,
-            "A decryption key source is not provided for an encrypted stream.");
+        init_event_status_.Update(Status(error::INVALID_ARGUMENT,
+                                         "A decryption key source is not "
+                                         "provided for an encrypted stream."));
       } else {
         init_event_status_.Update(
             DispatchStreamInfo(stream_index, stream_info));

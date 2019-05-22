@@ -5,16 +5,22 @@
 # https://developers.google.com/open-source/licenses/bsd
 
 {
-  'includes': [
-    '../../common.gypi',
-  ],
+  'variables': {
+    'shaka_code': 1,
+  },
   'targets': [
     {
       'target_name': 'crypto',
       'type': '<(component)',
       'sources': [
+        'aes_encryptor_factory.cc',
+        'aes_encryptor_factory.h',
         'encryption_handler.cc',
         'encryption_handler.h',
+        'sample_aes_ec3_cryptor.cc',
+        'sample_aes_ec3_cryptor.h',
+        'subsample_generator.cc',
+        'subsample_generator.h',
       ],
       'dependencies': [
         '../base/media_base.gyp:media_base',
@@ -26,6 +32,8 @@
       'type': '<(gtest_target_type)',
       'sources': [
         'encryption_handler_unittest.cc',
+        'sample_aes_ec3_cryptor_unittest.cc',
+        'subsample_generator_unittest.cc',
       ],
       'dependencies': [
         '../../testing/gtest.gyp:gtest',

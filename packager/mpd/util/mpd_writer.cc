@@ -13,35 +13,19 @@
 #include "packager/base/files/file_path.h"
 #include "packager/base/files/file_util.h"
 #include "packager/file/file.h"
-#include "packager/mpd/base/dash_iop_mpd_notifier.h"
 #include "packager/mpd/base/mpd_builder.h"
 #include "packager/mpd/base/mpd_notifier.h"
 #include "packager/mpd/base/mpd_utils.h"
 #include "packager/mpd/base/simple_mpd_notifier.h"
 
 DEFINE_bool(generate_dash_if_iop_compliant_mpd,
-            false,
-            "Try to generate DASH-IF IOPv3 compliant MPD. This is best effort "
-            "and does not guarantee compliance. Off by default until players "
-            "support IOP MPDs.");
+            true,
+            "Try to generate DASH-IF IOP compliant MPD. This is best effort "
+            "and does not guarantee compliance.");
 
 namespace shaka {
 
 namespace {
-
-// Factory that creates DashIopMpdNotifier instances.
-class DashIopMpdNotifierFactory : public MpdNotifierFactory {
- public:
-  DashIopMpdNotifierFactory() {}
-  ~DashIopMpdNotifierFactory() override {}
-
-  std::unique_ptr<MpdNotifier> Create(const MpdOptions& mpd_options,
-                                      const std::vector<std::string>& base_urls,
-                                      const std::string& output_path) override {
-    return std::unique_ptr<MpdNotifier>(
-        new DashIopMpdNotifier(mpd_options, base_urls, output_path));
-  }
-};
 
 // Factory that creates SimpleMpdNotifier instances.
 class SimpleMpdNotifierFactory : public MpdNotifierFactory {
@@ -49,26 +33,17 @@ class SimpleMpdNotifierFactory : public MpdNotifierFactory {
   SimpleMpdNotifierFactory() {}
   ~SimpleMpdNotifierFactory() override {}
 
-  std::unique_ptr<MpdNotifier> Create(const MpdOptions& mpd_options,
-                                      const std::vector<std::string>& base_urls,
-                                      const std::string& output_path) override {
-    return std::unique_ptr<MpdNotifier>(
-        new SimpleMpdNotifier(mpd_options, base_urls, output_path));
+  std::unique_ptr<MpdNotifier> Create(const MpdOptions& mpd_options) override {
+    return std::unique_ptr<MpdNotifier>(new SimpleMpdNotifier(mpd_options));
   }
 };
 
 }  // namespace
 
-MpdWriter::MpdWriter()
-    : notifier_factory_(FLAGS_generate_dash_if_iop_compliant_mpd
-                            ? static_cast<MpdNotifierFactory*>(
-                                  new DashIopMpdNotifierFactory())
-                            : static_cast<MpdNotifierFactory*>(
-                                  new SimpleMpdNotifierFactory())) {}
+MpdWriter::MpdWriter() : notifier_factory_(new SimpleMpdNotifierFactory()) {}
 MpdWriter::~MpdWriter() {}
 
-bool MpdWriter::AddFile(const std::string& media_info_path,
-                        const std::string& mpd_path) {
+bool MpdWriter::AddFile(const std::string& media_info_path) {
   std::string file_content;
   if (!File::ReadFileToString(media_info_path.c_str(), &file_content)) {
     LOG(ERROR) << "Failed to read " << media_info_path << " to string.";
@@ -82,7 +57,6 @@ bool MpdWriter::AddFile(const std::string& media_info_path,
     return false;
   }
 
-  MpdBuilder::MakePathsRelativeToMpd(mpd_path, &media_info);
   media_infos_.push_back(media_info);
   return true;
 }
@@ -93,20 +67,23 @@ void MpdWriter::AddBaseUrl(const std::string& base_url) {
 
 bool MpdWriter::WriteMpdToFile(const char* file_name) {
   CHECK(file_name);
+  MpdOptions mpd_options;
+  mpd_options.mpd_params.base_urls = base_urls_;
+  mpd_options.mpd_params.mpd_output = file_name;
+  mpd_options.mpd_params.generate_dash_if_iop_compliant_mpd =
+      FLAGS_generate_dash_if_iop_compliant_mpd;
   std::unique_ptr<MpdNotifier> notifier =
-      notifier_factory_->Create(MpdOptions(), base_urls_, file_name);
+      notifier_factory_->Create(mpd_options);
   if (!notifier->Init()) {
     LOG(ERROR) << "failed to initialize MpdNotifier.";
     return false;
   }
 
-  for (std::list<MediaInfo>::const_iterator it = media_infos_.begin();
-       it != media_infos_.end();
-       ++it) {
+  for (const MediaInfo& media_info : media_infos_) {
     uint32_t unused_conatiner_id;
-    if (!notifier->NotifyNewContainer(*it, &unused_conatiner_id)) {
+    if (!notifier->NotifyNewContainer(media_info, &unused_conatiner_id)) {
       LOG(ERROR) << "Failed to add MediaInfo for media file: "
-                 << it->media_file_name();
+                 << media_info.media_file_name();
       return false;
     }
   }

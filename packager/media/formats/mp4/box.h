@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_FORMATS_MP4_BOX_H_
-#define MEDIA_FORMATS_MP4_BOX_H_
+#ifndef PACKAGER_MEDIA_FORMATS_MP4_BOX_H_
+#define PACKAGER_MEDIA_FORMATS_MP4_BOX_H_
 
 #include <stdint.h>
 
@@ -87,8 +87,8 @@ struct FullBox : Box {
 
   uint32_t HeaderSize() const final;
 
-  uint8_t version;
-  uint32_t flags;
+  uint8_t version = 0;
+  uint32_t flags = 0;
 
  protected:
   bool ReadWriteHeaderInternal(BoxBuffer* buffer) final;
@@ -101,4 +101,4 @@ struct FullBox : Box {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_FORMATS_MP4_BOX_H_
+#endif  // PACKAGER_MEDIA_FORMATS_MP4_BOX_H_

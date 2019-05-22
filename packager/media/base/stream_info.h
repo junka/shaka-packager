@@ -4,9 +4,10 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_BASE_STREAM_INFO_H_
-#define MEDIA_BASE_STREAM_INFO_H_
+#ifndef PACKAGER_MEDIA_BASE_STREAM_INFO_H_
+#define PACKAGER_MEDIA_BASE_STREAM_INFO_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,15 +23,17 @@ enum StreamType {
   kStreamText,
 };
 
+std::string StreamTypeToString(StreamType type);
+
 enum Codec {
   kUnknownCodec = 0,
 
   kCodecVideo = 100,
-  kCodecH264 = kCodecVideo,
+  kCodecAV1 = kCodecVideo,
+  kCodecH264,
   kCodecH265,
   kCodecVP8,
   kCodecVP9,
-  kCodecVP10,
   kCodecVideoMaxPlusOne,
 
   kCodecAudio = 200,
@@ -45,6 +48,7 @@ enum Codec {
   kCodecDTSM,
   kCodecDTSP,
   kCodecEAC3,
+  kCodecFlac,
   kCodecOpus,
   kCodecVorbis,
   kCodecAudioMaxPlusOne,
@@ -58,10 +62,16 @@ class StreamInfo {
  public:
   StreamInfo() = default;
 
-  StreamInfo(StreamType stream_type, int track_id, uint32_t time_scale,
-             uint64_t duration, Codec codec, const std::string& codec_string,
-             const uint8_t* codec_config, size_t codec_config_size,
-             const std::string& language, bool is_encrypted);
+  StreamInfo(StreamType stream_type,
+             int track_id,
+             uint32_t time_scale,
+             uint64_t duration,
+             Codec codec,
+             const std::string& codec_string,
+             const uint8_t* codec_config,
+             size_t codec_config_size,
+             const std::string& language,
+             bool is_encrypted);
 
   virtual ~StreamInfo();
 
@@ -71,6 +81,11 @@ class StreamInfo {
 
   /// @return A human-readable string describing the stream info.
   virtual std::string ToString() const;
+
+  /// @return A new copy of this stream info. The copy will be of the same
+  ///         type as the original. This should be used when a copy is needed
+  ///         without explicitly knowing the stream info type.
+  virtual std::unique_ptr<StreamInfo> Clone() const = 0;
 
   StreamType stream_type() const { return stream_type_; }
   uint32_t track_id() const { return track_id_; }
@@ -88,7 +103,9 @@ class StreamInfo {
 
   void set_duration(uint64_t duration) { duration_ = duration; }
   void set_codec(Codec codec) { codec_ = codec; }
-  void set_codec_config(const std::vector<uint8_t>& data) { codec_config_ = data; }
+  void set_codec_config(const std::vector<uint8_t>& data) {
+    codec_config_ = data;
+  }
   void set_codec_string(const std::string& codec_string) {
     codec_string_ = codec_string;
   }
@@ -131,4 +148,4 @@ class StreamInfo {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_BASE_STREAM_INFO_H_
+#endif  // PACKAGER_MEDIA_BASE_STREAM_INFO_H_

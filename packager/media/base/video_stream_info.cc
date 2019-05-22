@@ -18,6 +18,8 @@ namespace media {
 namespace {
 std::string VideoCodecToString(Codec codec) {
   switch (codec) {
+    case kCodecAV1:
+      return "AV1";
     case kCodecH264:
       return "H264";
     case kCodecH265:
@@ -26,8 +28,6 @@ std::string VideoCodecToString(Codec codec) {
       return "VP8";
     case kCodecVP9:
       return "VP9";
-    case kCodecVP10:
-      return "VP10";
     default:
       NOTIMPLEMENTED() << "Unknown Video Codec: " << codec;
       return "UnknownCodec";
@@ -86,6 +86,10 @@ std::string VideoStreamInfo::ToString() const {
       StreamInfo::ToString().c_str(), VideoCodecToString(codec()).c_str(),
       width_, height_, pixel_width_, pixel_height_, trick_play_factor_,
       nalu_length_size_);
+}
+
+std::unique_ptr<StreamInfo> VideoStreamInfo::Clone() const {
+  return std::unique_ptr<StreamInfo>(new VideoStreamInfo(*this));
 }
 
 }  // namespace media

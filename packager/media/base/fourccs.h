@@ -20,7 +20,10 @@ enum FourCC : uint32_t {
 
   FOURCC_aacd = 0x61616364,
   FOURCC_ac_3 = 0x61632d33,  // "ac-3"
+  FOURCC_ac3d = 0x61633364,
   FOURCC_apad = 0x61706164,
+  FOURCC_av01 = 0x61763031,
+  FOURCC_av1C = 0x61763143,
   FOURCC_avc1 = 0x61766331,
   FOURCC_avc3 = 0x61766333,
   FOURCC_avcC = 0x61766343,
@@ -41,6 +44,7 @@ enum FourCC : uint32_t {
   FOURCC_dash = 0x64617368,
   FOURCC_ddts = 0x64647473,
   FOURCC_dec3 = 0x64656333,
+  FOURCC_dfLa = 0x64664c61,
   FOURCC_dinf = 0x64696e66,
   FOURCC_dref = 0x64726566,
   FOURCC_dtsc = 0x64747363,
@@ -50,11 +54,13 @@ enum FourCC : uint32_t {
   FOURCC_dtsm = 0x6474732d,  // "dts-"
   FOURCC_dtsp = 0x6474732b,  // "dts+"
   FOURCC_ec_3 = 0x65632d33,  // "ec-3"
+  FOURCC_ec3d = 0x65633364,
   FOURCC_edts = 0x65647473,
   FOURCC_elst = 0x656c7374,
   FOURCC_enca = 0x656e6361,
   FOURCC_encv = 0x656e6376,
   FOURCC_esds = 0x65736473,
+  FOURCC_fLaC = 0x664c6143,
   FOURCC_free = 0x66726565,
   FOURCC_frma = 0x66726d61,
   FOURCC_ftyp = 0x66747970,
@@ -135,7 +141,6 @@ enum FourCC : uint32_t {
   FOURCC_vmhd = 0x766d6864,
   FOURCC_vp08 = 0x76703038,
   FOURCC_vp09 = 0x76703039,
-  FOURCC_vp10 = 0x76703130,
   FOURCC_vpcC = 0x76706343,
   FOURCC_vsid = 0x76736964,
   FOURCC_vttC = 0x76747443,
@@ -145,8 +150,11 @@ enum FourCC : uint32_t {
   FOURCC_wide = 0x77696465,
   FOURCC_wvtt = 0x77767474,
   FOURCC_zaac = 0x7A616163,
+  FOURCC_zac3 = 0x7A616333,
   FOURCC_zach = 0x7A616368,
   FOURCC_zacp = 0x7A616370,
+  FOURCC_zavc = 0x7A617663,
+  FOURCC_zec3 = 0x7A656333,
 };
 
 const FourCC kAppleSampleAesProtectionScheme = FOURCC_cbca;

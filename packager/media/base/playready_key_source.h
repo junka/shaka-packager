@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_BASE_PLAYREADY_SOURCE_H_
-#define MEDIA_BASE_PLAYREADY_SOURCE_H_
+#ifndef PACKAGER_MEDIA_BASE_PLAYREADY_SOURCE_H_
+#define PACKAGER_MEDIA_BASE_PLAYREADY_SOURCE_H_
 
 #include <memory>
 #include <string>
@@ -16,26 +16,36 @@
 namespace shaka {
 namespace media {
 
-// SystemID defined for PlayReady Drm.
-const uint8_t kPlayReadySystemId[] = {0x9a, 0x04, 0xf0, 0x79, 0x98, 0x40, 0x42,
-    0x86, 0xab, 0x92, 0xe6, 0x5b, 0xe0, 0x88, 0x5f, 0x95};
-
-/// A key source that uses playready for encryption.
+/// A key source that uses PlayReady for encryption.
 class PlayReadyKeySource : public KeySource {
  public:
   /// Creates a new PlayReadyKeySource from the given packaging information.
   /// @param server_url PlayReady packaging server url.
-  PlayReadyKeySource(const std::string& server_url);
+  /// @param protection_systems_flags is the flags indicating which PSSH should
+  ///        be included.
+  /// @param protection_scheme is the Protection Scheme to be used for
+  ///        encryption. It needs to be signalled in Widevine PSSH. This
+  ///        argument can be ignored if Widevine PSSH is not generated.
+  PlayReadyKeySource(const std::string& server_url,
+                     int protection_systems_flags,
+                     FourCC protection_scheme);
   /// Creates a new PlayReadyKeySource from the given packaging information.
   /// @param server_url PlayReady packaging server url.
   /// @param client_cert_file absolute path to a client certificate.
   /// @param client_cert_private_key_file absolute path to the private file
   ///     for the client certificate.
   /// @param client_cert_private_key_password password for the private key.
+  /// @param protection_systems_flags is the flags indicating which PSSH should
+  ///        be included.
+  /// @param protection_scheme is the Protection Scheme to be used for
+  ///        encryption. It needs to be signalled in Widevine PSSH. This
+  ///        argument can be ignored if Widevine PSSH is not generated.
   PlayReadyKeySource(const std::string& server_url,
                      const std::string& client_cert_file,
                      const std::string& client_cert_private_key_file,
-                     const std::string& client_cert_private_key_password);
+                     const std::string& client_cert_private_key_password,
+                     int protection_systems_flags,
+                     FourCC protection_scheme);
   ~PlayReadyKeySource() override;
 
   /// @name KeySource implementation overrides.
@@ -46,6 +56,7 @@ class PlayReadyKeySource : public KeySource {
   Status GetKey(const std::vector<uint8_t>& key_id,
                 EncryptionKey* key) override;
   Status GetCryptoPeriodKey(uint32_t crypto_period_index,
+                            uint32_t crypto_period_duration_in_seconds,
                             const std::string& stream_label,
                             EncryptionKey* key) override;
   /// @}
@@ -66,7 +77,9 @@ class PlayReadyKeySource : public KeySource {
  private:
   Status GetKeyInternal();
   Status GetCryptoPeriodKeyInternal();
-  explicit PlayReadyKeySource(std::unique_ptr<EncryptionKey> key);
+
+  // Indicates whether PlayReady protection system should be generated.
+  bool generate_playready_protection_system_ = true;
 
   std::unique_ptr<EncryptionKey> encryption_key_;
   std::string server_url_;
@@ -81,4 +94,4 @@ class PlayReadyKeySource : public KeySource {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_BASE_PLAYREADY_SOURCE_H_
+#endif  // PACKAGER_MEDIA_BASE_PLAYREADY_SOURCE_H_

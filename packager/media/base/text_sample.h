@@ -19,24 +19,25 @@ class TextSample {
   TextSample() = default;
 
   const std::string& id() const { return id_; }
-  uint64_t start_time() const { return start_time_; }
-  uint64_t duration() const { return duration_; }
+  int64_t start_time() const { return start_time_; }
+  int64_t duration() const { return duration_; }
   const std::string& settings() const { return settings_; }
   const std::string& payload() const { return payload_; }
-  uint64_t EndTime() const;
+  int64_t EndTime() const;
 
   void set_id(const std::string& id) { id_ = id; }
-  void set_settings(const std::string& settings) { settings_ = settings; }
-  void SetTime(uint64_t start_time, uint64_t end_time);
+  void SetTime(int64_t start_time, int64_t end_time);
+  void AppendStyle(const std::string& style);
   void AppendPayload(const std::string& payload);
 
  private:
-  TextSample(const TextSample&) = delete;
-  TextSample& operator=(const TextSample&) = delete;
+  // Allow the compiler generated copy constructor and assignment operator
+  // intentionally. Since the text data is typically small, the performance
+  // impact is minimal.
 
   std::string id_;
-  uint64_t start_time_ = 0;
-  uint64_t duration_ = 0;
+  int64_t start_time_ = 0;
+  int64_t duration_ = 0;
   std::string settings_;
   std::string payload_;
 };
@@ -44,4 +45,4 @@ class TextSample {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_BASE_TEXT_SAMPLE_H_
+#endif  // PACKAGER_MEDIA_BASE_TEXT_SAMPLE_H_

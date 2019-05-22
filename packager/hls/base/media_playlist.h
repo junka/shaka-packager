@@ -10,9 +10,11 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "packager/base/macros.h"
-#include "packager/hls/public/hls_playlist_type.h"
+#include "packager/hls/public/hls_params.h"
+#include "packager/mpd/base/bandwidth_estimator.h"
 #include "packager/mpd/base/media_info.pb.h"
 
 namespace shaka {
@@ -27,6 +29,7 @@ class HlsEntry {
     kExtInf,
     kExtKey,
     kExtDiscontinuity,
+    kExtPlacementOpportunity,
   };
   virtual ~HlsEntry();
 
@@ -44,10 +47,11 @@ class HlsEntry {
 class MediaPlaylist {
  public:
   enum class MediaPlaylistStreamType {
-    kPlaylistUnknown,
-    kPlayListAudio,
-    kPlayListVideo,
-    kPlayListSubtitle,
+    kUnknown,
+    kAudio,
+    kVideo,
+    kVideoIFramesOnly,
+    kSubtitle,
   };
   enum class EncryptionMethod {
     kNone,           // No encryption, i.e. clear.
@@ -56,17 +60,15 @@ class MediaPlaylist {
     kSampleAesCenc,  // 'cenc' encrypted content.
   };
 
-  /// @param playlist_type is the type of this media playlist.
-  /// @param time_shift_buffer_depth determines the duration of the time
-  ///        shifting buffer, only for live HLS.
-  /// @param file_name is the file name of this media playlist.
+  /// @param hls_params contains HLS parameters.
+  /// @param file_name is the file name of this media playlist, relative to
+  ///        master playlist output path.
   /// @param name is the name of this playlist. In other words this is the
   ///        value of the NAME attribute for EXT-X-MEDIA. This is not
   ///        necessarily the same as @a file_name.
   /// @param group_id is the group ID for this playlist. This is the value of
   ///        GROUP-ID attribute for EXT-X-MEDIA.
-  MediaPlaylist(HlsPlaylistType playlist_type,
-                double time_shift_buffer_depth,
+  MediaPlaylist(const HlsParams& hls_params,
                 const std::string& file_name,
                 const std::string& name,
                 const std::string& group_id);
@@ -84,6 +86,13 @@ class MediaPlaylist {
   /// For testing only.
   void SetCodecForTesting(const std::string& codec);
 
+  /// For testing only.
+  void SetLanguageForTesting(const std::string& language);
+
+  /// For testing only.
+  void SetCharacteristicsForTesting(
+      const std::vector<std::string>& characteristics);
+
   /// This must succeed before calling any other public methods.
   /// @param media_info is the info of the segments that are going to be added
   ///        to this playlist.
@@ -98,10 +107,20 @@ class MediaPlaylist {
   ///        This must be 0 if the whole segment is a subsegment.
   /// @param size is size in bytes.
   virtual void AddSegment(const std::string& file_name,
-                          uint64_t start_time,
-                          uint64_t duration,
+                          int64_t start_time,
+                          int64_t duration,
                           uint64_t start_byte_offset,
                           uint64_t size);
+
+  /// Keyframes must be added in order. It is also called before the containing
+  /// segment being called.
+  /// @param timestamp is the timestamp of the key frame in timescale of the
+  ///        media.
+  /// @param start_byte_offset is the offset of where the key frame starts.
+  /// @param size is size in bytes.
+  virtual void AddKeyFrame(int64_t timestamp,
+                           uint64_t start_byte_offset,
+                           uint64_t size);
 
   /// All segments added after calling this method must be decryptable with
   /// the key that can be fetched from |url|, until calling this again.
@@ -121,6 +140,10 @@ class MediaPlaylist {
                                  const std::string& key_format,
                                  const std::string& key_format_versions);
 
+  /// Add #EXT-X-PLACEMENT-OPPORTUNITY for mid-roll ads. See
+  /// https://support.google.com/dfp_premium/answer/7295798?hl=en.
+  virtual void AddPlacementOpportunity();
+
   /// Write the playlist to |file_path|.
   /// This does not close the file.
   /// If target duration is not set expliticly, this will try to find the target
@@ -135,8 +158,13 @@ class MediaPlaylist {
 
   /// If bitrate is specified in MediaInfo then it will use that value.
   /// Otherwise, returns the max bitrate.
-  /// @return the bitrate (in bits per second) of this MediaPlaylist.
-  virtual uint64_t Bitrate() const;
+  /// @return the max bitrate (in bits per second) of this MediaPlaylist.
+  virtual uint64_t MaxBitrate() const;
+
+  /// Unlike @a MaxBitrate, AvgBitrate is always computed from the segment size
+  /// and duration.
+  /// @return The average bitrate (in bits per second) of this MediaPlaylist.
+  virtual uint64_t AvgBitrate() const;
 
   /// @return the longest segment’s duration. This will return 0 if no
   ///         segments have been added.
@@ -151,29 +179,51 @@ class MediaPlaylist {
   /// @param target_duration is the target duration for this playlist.
   virtual void SetTargetDuration(uint32_t target_duration);
 
-  /// @return the language of the media, as an ISO language tag in its shortest
-  ///         form.  May be an empty string for video.
-  virtual std::string GetLanguage() const;
+  /// @return number of channels for audio. 0 is returned for video.
+  virtual int GetNumChannels() const;
 
   /// @return true if |width| and |height| have been set with a valid
   ///         resolution values.
   virtual bool GetDisplayResolution(uint32_t* width, uint32_t* height) const;
 
+  /// @return the language of the media, as an ISO language tag in its shortest
+  ///         form.  May be an empty string for video.
+  const std::string& language() const { return language_; }
+
+  const std::vector<std::string>& characteristics() const {
+    return characteristics_;
+  }
+
  private:
+  // Add a SegmentInfoEntry (#EXTINF).
+  void AddSegmentInfoEntry(const std::string& segment_file_name,
+                           int64_t start_time,
+                           int64_t duration,
+                           uint64_t start_byte_offset,
+                           uint64_t size);
+  // Adjust the duration of the last SegmentInfoEntry to end on
+  // |next_timestamp|.
+  void AdjustLastSegmentInfoEntryDuration(int64_t next_timestamp);
   // Remove elements from |entries_| for live profile. Increments
   // |sequence_number_| by the number of segments removed.
   void SlideWindow();
+  // Remove the segment specified by |start_time|. The actual deletion can
+  // happen at a later time depending on the value of
+  // |preserved_segment_outside_live_window| in |hls_params_|.
+  void RemoveOldSegment(int64_t start_time);
 
-  const HlsPlaylistType playlist_type_;
-  const double time_shift_buffer_depth_;
+  const HlsParams& hls_params_;
   // Mainly for MasterPlaylist to use these values.
   const std::string file_name_;
   const std::string name_;
   const std::string group_id_;
   MediaInfo media_info_;
-  MediaPlaylistStreamType stream_type_ =
-      MediaPlaylistStreamType::kPlaylistUnknown;
+  MediaPlaylistStreamType stream_type_ = MediaPlaylistStreamType::kUnknown;
+  // Whether to use byte range for SegmentInfoEntry.
+  bool use_byte_range_ = false;
   std::string codec_;
+  std::string language_;
+  std::vector<std::string> characteristics_;
   int media_sequence_number_ = 0;
   bool inserted_discontinuity_tag_ = false;
   int discontinuity_sequence_number_ = 0;
@@ -181,7 +231,7 @@ class MediaPlaylist {
   double longest_segment_duration_ = 0.0;
   uint32_t time_scale_ = 0;
 
-  uint64_t max_bitrate_ = 0;
+  BandwidthEstimator bandwidth_estimator_;
 
   // Cache the previous calls AddSegment() end offset. This is used to construct
   // SegmentInfoEntry.
@@ -191,7 +241,22 @@ class MediaPlaylist {
   bool target_duration_set_ = false;
   uint32_t target_duration_ = 0;
 
+  // TODO(kqyang): This could be managed better by a separate class, than having
+  // all them managed in MediaPlaylist.
   std::list<std::unique_ptr<HlsEntry>> entries_;
+  double current_buffer_depth_ = 0;
+  // A list to hold the file names of the segments to be removed temporarily.
+  // Once a file is actually removed, it is removed from the list.
+  std::list<std::string> segments_to_be_removed_;
+
+  // Used by kVideoIFrameOnly playlists to track the i-frames (key frames).
+  struct KeyFrameInfo {
+    int64_t timestamp;
+    uint64_t start_byte_offset;
+    uint64_t size;
+    std::string segment_file_name;
+  };
+  std::list<KeyFrameInfo> key_frames_;
 
   DISALLOW_COPY_AND_ASSIGN(MediaPlaylist);
 };

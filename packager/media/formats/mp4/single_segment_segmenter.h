@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_FORMATS_MP4_SINGLE_SEGMENT_SEGMENTER_H_
-#define MEDIA_FORMATS_MP4_SINGLE_SEGMENT_SEGMENTER_H_
+#ifndef PACKAGER_MEDIA_FORMATS_MP4_SINGLE_SEGMENT_SEGMENTER_H_
+#define PACKAGER_MEDIA_FORMATS_MP4_SINGLE_SEGMENT_SEGMENTER_H_
 
 #include "packager/file/file_closer.h"
 #include "packager/media/event/muxer_listener.h"
@@ -25,7 +25,7 @@ namespace mp4 {
 /// is, the Segmenter tries to end subsegment/fragment at the first sample with
 /// overall subsegment/fragment duration not smaller than defined duration and
 /// yet meet SAP requirements. SingleSegmentSegmenter ignores @b
-/// MuxerOptions.num_subsegments_per_sidx.
+/// MuxerOptions.mp4_params.generate_sidx_in_media_segments.
 class SingleSegmentSegmenter : public Segmenter {
  public:
   SingleSegmentSegmenter(const MuxerOptions& options,
@@ -57,4 +57,4 @@ class SingleSegmentSegmenter : public Segmenter {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_FORMATS_MP4_SINGLE_SEGMENT_SEGMENTER_H_
+#endif  // PACKAGER_MEDIA_FORMATS_MP4_SINGLE_SEGMENT_SEGMENTER_H_

@@ -9,7 +9,6 @@
 #include "packager/base/logging.h"
 #include "packager/base/strings/string_number_conversions.h"
 #include "packager/base/strings/string_split.h"
-#include "packager/media/base/language_utils.h"
 
 namespace shaka {
 
@@ -27,8 +26,11 @@ enum FieldType {
   kHlsNameField,
   kHlsGroupIdField,
   kHlsPlaylistNameField,
+  kHlsIframePlaylistNameField,
   kTrickPlayFactorField,
   kSkipEncryptionField,
+  kDrmStreamLabelField,
+  kHlsCharacteristicsField,
 };
 
 struct FieldNameToTypeMapping {
@@ -56,9 +58,15 @@ const FieldNameToTypeMapping kFieldNameTypeMappings[] = {
     {"hls_name", kHlsNameField},
     {"hls_group_id", kHlsGroupIdField},
     {"playlist_name", kHlsPlaylistNameField},
+    {"iframe_playlist_name", kHlsIframePlaylistNameField},
     {"trick_play_factor", kTrickPlayFactorField},
     {"tpf", kTrickPlayFactorField},
     {"skip_encryption", kSkipEncryptionField},
+    {"drm_stream_label", kDrmStreamLabelField},
+    {"drm_label", kDrmStreamLabelField},
+    {"hls_characteristics", kHlsCharacteristicsField},
+    {"characteristics", kHlsCharacteristicsField},
+    {"charcs", kHlsCharacteristicsField},
 };
 
 FieldType GetFieldType(const std::string& field_name) {
@@ -79,7 +87,8 @@ base::Optional<StreamDescriptor> ParseStreamDescriptor(
   base::StringPairs pairs;
   if (!base::SplitStringIntoKeyValuePairs(descriptor_string, '=', ',',
                                           &pairs)) {
-    LOG(ERROR) << "Invalid stream descriptors name/value pairs.";
+    LOG(ERROR) << "Invalid stream descriptors name/value pairs: "
+               << descriptor_string;
     return base::nullopt;
   }
   for (base::StringPairs::const_iterator iter = pairs.begin();
@@ -107,13 +116,7 @@ base::Optional<StreamDescriptor> ParseStreamDescriptor(
         break;
       }
       case kLanguageField: {
-        // TODO(kqyang): Move to packager.cc.
-        std::string language = LanguageToISO_639_2(iter->second);
-        if (language == "und") {
-          LOG(ERROR) << "Unknown/invalid language specified: " << iter->second;
-          return base::nullopt;
-        }
-        descriptor.language = language;
+        descriptor.language = iter->second;
         break;
       }
       case kOutputFormatField: {
@@ -130,6 +133,10 @@ base::Optional<StreamDescriptor> ParseStreamDescriptor(
       }
       case kHlsPlaylistNameField: {
         descriptor.hls_playlist_name = iter->second;
+        break;
+      }
+      case kHlsIframePlaylistNameField: {
+        descriptor.hls_iframe_playlist_name = iter->second;
         break;
       }
       case kTrickPlayFactorField: {
@@ -161,6 +168,14 @@ base::Optional<StreamDescriptor> ParseStreamDescriptor(
         descriptor.skip_encryption = skip_encryption_value > 0;
         break;
       }
+      case kDrmStreamLabelField:
+        descriptor.drm_label = iter->second;
+        break;
+      case kHlsCharacteristicsField:
+        descriptor.hls_characteristics =
+            base::SplitString(iter->second, ";:", base::TRIM_WHITESPACE,
+                              base::SPLIT_WANT_NONEMPTY);
+        break;
       default:
         LOG(ERROR) << "Unknown field in stream descriptor (\"" << iter->first
                    << "\").";

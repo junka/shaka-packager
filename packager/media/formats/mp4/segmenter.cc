@@ -10,6 +10,7 @@
 
 #include "packager/base/logging.h"
 #include "packager/media/base/buffer_writer.h"
+#include "packager/media/base/id3_tag.h"
 #include "packager/media/base/media_sample.h"
 #include "packager/media/base/muxer_options.h"
 #include "packager/media/base/muxer_util.h"
@@ -18,6 +19,7 @@
 #include "packager/media/event/progress_listener.h"
 #include "packager/media/formats/mp4/box_definitions.h"
 #include "packager/media/formats/mp4/fragmenter.h"
+#include "packager/media/formats/mp4/key_frame_info.h"
 #include "packager/version/version.h"
 
 namespace shaka {
@@ -47,7 +49,7 @@ Segmenter::Segmenter(const MuxerOptions& options,
 Segmenter::~Segmenter() {}
 
 Status Segmenter::Initialize(
-    const std::vector<std::shared_ptr<StreamInfo>>& streams,
+    const std::vector<std::shared_ptr<const StreamInfo>>& streams,
     MuxerListener* muxer_listener,
     ProgressListener* progress_listener) {
   DCHECK_LT(0u, streams.size());
@@ -66,12 +68,16 @@ Status Segmenter::Initialize(
       if (sidx_->reference_id == 0)
         sidx_->reference_id = i + 1;
     }
-    fragmenters_[i].reset(new Fragmenter(streams[i], &moof_->tracks[i]));
-  }
 
-  if (options_.mp4_use_decoding_timestamp_in_timeline) {
-    for (uint32_t i = 0; i < streams.size(); ++i)
-      fragmenters_[i]->set_use_decoding_timestamp_in_timeline(true);
+    const EditList& edit_list = moov_->tracks[i].edit.list;
+    int64_t edit_list_offset = 0;
+    if (edit_list.edits.size() > 0) {
+      DCHECK_EQ(edit_list.edits.size(), 1u);
+      edit_list_offset = edit_list.edits.front().media_time;
+    }
+
+    fragmenters_[i].reset(
+        new Fragmenter(streams[i], &moof_->tracks[i], edit_list_offset));
   }
 
   // Choose the first stream if there is no VIDEO.
@@ -91,8 +97,10 @@ Status Segmenter::Initialize(
   if (!version.empty()) {
     moov_->metadata.handler.handler_type = FOURCC_ID32;
     moov_->metadata.id3v2.language.code = "eng";
-    moov_->metadata.id3v2.private_frame.owner = GetPackagerProjectUrl();
-    moov_->metadata.id3v2.private_frame.value = version;
+
+    Id3Tag id3_tag;
+    id3_tag.AddPrivateFrame(GetPackagerProjectUrl(), version);
+    CHECK(id3_tag.WriteToVector(&moov_->metadata.id3v2.id3v2_data));
   }
   return DoInitialize();
 }
@@ -100,7 +108,7 @@ Status Segmenter::Initialize(
 Status Segmenter::Finalize() {
   // Set movie duration. Note that the duration in mvhd, tkhd, mdhd should not
   // be touched, i.e. kept at 0. The updated moov box will be written to output
-  // file for VOD case only.
+  // file for VOD and static live case only.
   moov_->extends.header.fragment_duration = 0;
   for (size_t i = 0; i < stream_durations_.size(); ++i) {
     uint64_t duration =
@@ -112,12 +120,11 @@ Status Segmenter::Finalize() {
   return DoFinalize();
 }
 
-Status Segmenter::AddSample(size_t stream_id,
-                            std::shared_ptr<MediaSample> sample) {
+Status Segmenter::AddSample(size_t stream_id, const MediaSample& sample) {
   // Set default sample duration if it has not been set yet.
   if (moov_->extends.tracks[stream_id].default_sample_duration == 0) {
     moov_->extends.tracks[stream_id].default_sample_duration =
-        sample->duration();
+        sample.duration();
   }
 
   DCHECK_LT(stream_id, fragmenters_.size());
@@ -132,17 +139,17 @@ Status Segmenter::AddSample(size_t stream_id,
     return status;
 
   if (sample_duration_ == 0)
-    sample_duration_ = sample->duration();
-  stream_durations_[stream_id] += sample->duration();
+    sample_duration_ = sample.duration();
+  stream_durations_[stream_id] += sample.duration();
   return Status::OK;
 }
 
 Status Segmenter::FinalizeSegment(size_t stream_id,
-                                  std::shared_ptr<SegmentInfo> segment_info) {
-  if (segment_info->key_rotation_encryption_config) {
+                                  const SegmentInfo& segment_info) {
+  if (segment_info.key_rotation_encryption_config) {
     FinalizeFragmentForKeyRotation(
-        stream_id, segment_info->is_encrypted,
-        *segment_info->key_rotation_encryption_config);
+        stream_id, segment_info.is_encrypted,
+        *segment_info.key_rotation_encryption_config);
   }
 
   DCHECK_LT(stream_id, fragmenters_.size());
@@ -189,21 +196,39 @@ Status Segmenter::FinalizeSegment(size_t stream_id,
   sidx_->references[sidx_->references.size() - 1].referenced_size =
       data_offset + mdat.data_size;
 
+  const uint64_t moof_start_offset = fragment_buffer_->Size();
+
   // Write the fragment to buffer.
   moof_->Write(fragment_buffer_.get());
   mdat.WriteHeader(fragment_buffer_.get());
-  for (const std::unique_ptr<Fragmenter>& fragmenter : fragmenters_)
+
+  bool first_key_frame = true;
+  for (const std::unique_ptr<Fragmenter>& fragmenter : fragmenters_) {
+    // https://goo.gl/xcFus6 6. Trick play requirements
+    // 6.10. If using fMP4, I-frame segments must include the 'moof' header
+    // associated with the I-frame. It also implies that only the first key
+    // frame can be included.
+    if (!fragmenter->key_frame_infos().empty() && first_key_frame) {
+      const KeyFrameInfo& key_frame_info =
+          fragmenter->key_frame_infos().front();
+      first_key_frame = false;
+      key_frame_infos_.push_back(
+          {key_frame_info.timestamp, moof_start_offset,
+           fragment_buffer_->Size() - moof_start_offset + key_frame_info.size});
+    }
     fragment_buffer_->AppendBuffer(*fragmenter->data());
+  }
 
   // Increase sequence_number for next fragment.
   ++moof_->header.sequence_number;
 
   for (std::unique_ptr<Fragmenter>& fragmenter : fragmenters_)
     fragmenter->ClearFragmentFinalized();
-  if (!segment_info->is_subsegment) {
+  if (!segment_info.is_subsegment) {
     Status status = DoFinalizeSegment();
     // Reset segment information to initial state.
     sidx_->references.clear();
+    key_frame_infos_.clear();
     return status;
   }
   return Status::OK;
@@ -252,12 +277,16 @@ void Segmenter::FinalizeFragmentForKeyRotation(
     size_t stream_id,
     bool fragment_encrypted,
     const EncryptionConfig& encryption_config) {
-  if (options_.mp4_include_pssh_in_stream) {
-    const std::vector<ProtectionSystemSpecificInfo>& system_info =
-        encryption_config.key_system_info;
-    moof_->pssh.resize(system_info.size());
-    for (size_t i = 0; i < system_info.size(); i++)
-      moof_->pssh[i].raw_box = system_info[i].CreateBox();
+  if (options_.mp4_params.include_pssh_in_stream) {
+    moof_->pssh.clear();
+    const auto& key_system_info = encryption_config.key_system_info;
+    for (const ProtectionSystemSpecificInfo& system : key_system_info) {
+      if (system.psshs.empty())
+        continue;
+      ProtectionSystemSpecificHeader pssh;
+      pssh.raw_box = system.psshs;
+      moof_->pssh.push_back(pssh);
+    }
   } else {
     LOG(WARNING)
         << "Key rotation and no pssh in stream may not work well together.";

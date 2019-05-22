@@ -6,6 +6,8 @@
 
 #include "packager/media/formats/mp4/mp4_muxer.h"
 
+#include <algorithm>
+
 #include "packager/base/time/clock.h"
 #include "packager/base/time/time.h"
 #include "packager/file/file.h"
@@ -21,6 +23,7 @@
 #include "packager/media/formats/mp4/box_definitions.h"
 #include "packager/media/formats/mp4/multi_segment_segmenter.h"
 #include "packager/media/formats/mp4/single_segment_segmenter.h"
+#include "packager/status_macros.h"
 
 namespace shaka {
 namespace media {
@@ -41,6 +44,8 @@ void SetStartAndEndFromOffsetAndSize(size_t offset,
 
 FourCC CodecToFourCC(Codec codec, H26xStreamFormat h26x_stream_format) {
   switch (codec) {
+    case kCodecAV1:
+      return FOURCC_av01;
     case kCodecH264:
       return h26x_stream_format ==
                      H26xStreamFormat::kNalUnitStreamWithParameterSetNalus
@@ -55,8 +60,6 @@ FourCC CodecToFourCC(Codec codec, H26xStreamFormat h26x_stream_format) {
       return FOURCC_vp08;
     case kCodecVP9:
       return FOURCC_vp09;
-    case kCodecVP10:
-      return FOURCC_vp10;
     case kCodecAAC:
       return FOURCC_mp4a;
     case kCodecAC3:
@@ -73,6 +76,8 @@ FourCC CodecToFourCC(Codec codec, H26xStreamFormat h26x_stream_format) {
       return FOURCC_dtsm;
     case kCodecEAC3:
       return FOURCC_ec_3;
+    case kCodecFlac:
+      return FOURCC_fLaC;
     case kCodecOpus:
       return FOURCC_Opus;
     default:
@@ -94,13 +99,45 @@ void GenerateSinf(FourCC old_type,
 
   auto& track_encryption = sinf->info.track_encryption;
   track_encryption.default_is_protected = 1;
+
   track_encryption.default_crypt_byte_block =
       encryption_config.crypt_byte_block;
   track_encryption.default_skip_byte_block = encryption_config.skip_byte_block;
+  switch (encryption_config.protection_scheme) {
+    case FOURCC_cenc:
+    case FOURCC_cbc1:
+      DCHECK_EQ(track_encryption.default_crypt_byte_block, 0u);
+      DCHECK_EQ(track_encryption.default_skip_byte_block, 0u);
+      // CENCv3 10.1 ‘cenc’ AES-CTR scheme and 10.2 ‘cbc1’ AES-CBC scheme:
+      // The version of the Track Encryption Box (‘tenc’) SHALL be 0.
+      track_encryption.version = 0;
+      break;
+    case FOURCC_cbcs:
+    case FOURCC_cens:
+      // CENCv3 10.3 ‘cens’ AES-CTR subsample pattern encryption scheme and
+      //        10.4 ‘cbcs’ AES-CBC subsample pattern encryption scheme:
+      // The version of the Track Encryption Box (‘tenc’) SHALL be 1.
+      track_encryption.version = 1;
+      break;
+    default:
+      NOTREACHED() << "Unexpected protection scheme "
+                   << encryption_config.protection_scheme;
+  }
+
   track_encryption.default_per_sample_iv_size =
       encryption_config.per_sample_iv_size;
   track_encryption.default_constant_iv = encryption_config.constant_iv;
   track_encryption.default_kid = encryption_config.key_id;
+}
+
+// The roll distance is expressed in sample units and always takes negative
+// values.
+int16_t GetRollDistance(uint64_t seek_preroll_ns, uint32_t sampling_frequency) {
+  const double kNanosecondsPerSecond = 1000000000;
+  const double preroll_in_samples =
+      seek_preroll_ns / kNanosecondsPerSecond * sampling_frequency;
+  // Round to closest integer.
+  return -static_cast<int16_t>(preroll_in_samples + 0.5);
 }
 
 }  // namespace
@@ -109,6 +146,52 @@ MP4Muxer::MP4Muxer(const MuxerOptions& options) : Muxer(options) {}
 MP4Muxer::~MP4Muxer() {}
 
 Status MP4Muxer::InitializeMuxer() {
+  // Muxer will be delay-initialized after seeing the first sample.
+  to_be_initialized_ = true;
+  return Status::OK;
+}
+
+Status MP4Muxer::Finalize() {
+  // This happens on streams that are not initialized, i.e. not going through
+  // DelayInitializeMuxer, which can only happen if there are no samples from
+  // the stream.
+  if (!segmenter_) {
+    DCHECK(to_be_initialized_);
+    LOG(INFO) << "Skip stream '" << options().output_file_name
+              << "' which does not contain any sample.";
+    return Status::OK;
+  }
+
+  Status segmenter_finalized = segmenter_->Finalize();
+
+  if (!segmenter_finalized.ok())
+    return segmenter_finalized;
+
+  FireOnMediaEndEvent();
+  LOG(INFO) << "MP4 file '" << options().output_file_name << "' finalized.";
+  return Status::OK;
+}
+
+Status MP4Muxer::AddSample(size_t stream_id, const MediaSample& sample) {
+  if (to_be_initialized_) {
+    RETURN_IF_ERROR(UpdateEditListOffsetFromSample(sample));
+    RETURN_IF_ERROR(DelayInitializeMuxer());
+    to_be_initialized_ = false;
+  }
+  DCHECK(segmenter_);
+  return segmenter_->AddSample(stream_id, sample);
+}
+
+Status MP4Muxer::FinalizeSegment(size_t stream_id,
+                                 const SegmentInfo& segment_info) {
+  DCHECK(segmenter_);
+  VLOG(3) << "Finalizing " << (segment_info.is_subsegment ? "sub" : "")
+          << "segment " << segment_info.start_timestamp << " duration "
+          << segment_info.duration;
+  return segmenter_->FinalizeSegment(stream_id, segment_info);
+}
+
+Status MP4Muxer::DelayInitializeMuxer() {
   DCHECK(!streams().empty());
 
   std::unique_ptr<FileType> ftyp(new FileType);
@@ -124,7 +207,7 @@ Status MP4Muxer::InitializeMuxer() {
     if (streams()[0]->stream_type() == kStreamVideo) {
       codec_fourcc =
           CodecToFourCC(streams()[0]->codec(),
-                        static_cast<VideoStreamInfo*>(streams()[0].get())
+                        static_cast<const VideoStreamInfo*>(streams()[0].get())
                             ->h26x_stream_format());
       if (codec_fourcc != FOURCC_NULL)
         ftyp->compatible_brands.push_back(codec_fourcc);
@@ -146,6 +229,7 @@ Status MP4Muxer::InitializeMuxer() {
 
   // Initialize tracks.
   for (uint32_t i = 0; i < streams().size(); ++i) {
+    const StreamInfo* stream = streams()[i].get();
     Track& trak = moov->tracks[i];
     trak.header.track_id = i + 1;
 
@@ -153,30 +237,46 @@ Status MP4Muxer::InitializeMuxer() {
     trex.track_id = trak.header.track_id;
     trex.default_sample_description_index = 1;
 
-    switch (streams()[i]->stream_type()) {
+    bool generate_trak_result = false;
+    switch (stream->stream_type()) {
       case kStreamVideo:
-        GenerateVideoTrak(static_cast<VideoStreamInfo*>(streams()[i].get()),
-                          &trak, i + 1);
+        generate_trak_result = GenerateVideoTrak(
+            static_cast<const VideoStreamInfo*>(stream), &trak, i + 1);
         break;
       case kStreamAudio:
-        GenerateAudioTrak(static_cast<AudioStreamInfo*>(streams()[i].get()),
-                          &trak, i + 1);
+        generate_trak_result = GenerateAudioTrak(
+            static_cast<const AudioStreamInfo*>(stream), &trak, i + 1);
         break;
       case kStreamText:
-        GenerateTextTrak(static_cast<TextStreamInfo*>(streams()[i].get()),
-                         &trak, i + 1);
+        generate_trak_result = GenerateTextTrak(
+            static_cast<const TextStreamInfo*>(stream), &trak, i + 1);
         break;
       default:
         NOTIMPLEMENTED() << "Not implemented for stream type: "
-                         << streams()[i]->stream_type();
+                         << stream->stream_type();
+    }
+    if (!generate_trak_result)
+      return Status(error::MUXER_FAILURE, "Failed to generate trak.");
+
+    // Generate EditList if needed. See UpdateEditListOffsetFromSample() for
+    // more information.
+    if (edit_list_offset_.value() > 0) {
+      EditListEntry entry;
+      entry.media_time = edit_list_offset_.value();
+      entry.media_rate_integer = 1;
+      trak.edit.list.edits.push_back(entry);
     }
 
-    if (streams()[i]->is_encrypted() && options().mp4_include_pssh_in_stream) {
-      const auto& key_system_info =
-          streams()[i]->encryption_config().key_system_info;
-      moov->pssh.resize(key_system_info.size());
-      for (size_t j = 0; j < key_system_info.size(); j++)
-        moov->pssh[j].raw_box = key_system_info[j].CreateBox();
+    if (stream->is_encrypted() && options().mp4_params.include_pssh_in_stream) {
+      moov->pssh.clear();
+      const auto& key_system_info = stream->encryption_config().key_system_info;
+      for (const ProtectionSystemSpecificInfo& system : key_system_info) {
+        if (system.psshs.empty())
+          continue;
+        ProtectionSystemSpecificHeader pssh;
+        pssh.raw_box = system.psshs;
+        moov->pssh.push_back(pssh);
+      }
     }
   }
 
@@ -197,31 +297,65 @@ Status MP4Muxer::InitializeMuxer() {
   return Status::OK;
 }
 
-Status MP4Muxer::Finalize() {
-  DCHECK(segmenter_);
-  Status segmenter_finalized = segmenter_->Finalize();
+Status MP4Muxer::UpdateEditListOffsetFromSample(const MediaSample& sample) {
+  if (edit_list_offset_)
+    return Status::OK;
 
-  if (!segmenter_finalized.ok())
-    return segmenter_finalized;
-
-  FireOnMediaEndEvent();
-  LOG(INFO) << "MP4 file '" << options().output_file_name << "' finalized.";
+  const int64_t pts = sample.pts();
+  const int64_t dts = sample.dts();
+  // An EditList entry is inserted if one of the below conditions occur [4]:
+  // (1) pts > dts for the first sample. Due to Chrome's dts bug [1], dts is
+  //     used in buffered range API, while pts is used elsewhere (players,
+  //     manifests, and Chrome's own appendWindow check etc.), this
+  //     inconsistency creates various problems, including possible stalls
+  //     during playback. Since Chrome adjusts pts only when seeing EditList
+  //     [2], we can insert an EditList with the time equal to difference of pts
+  //     and dts to make aligned buffered ranges using pts and dts. This
+  //     effectively workarounds the dts bug. It is also recommended by ISO-BMFF
+  //     specification [3].
+  // (2) pts == dts and with pts < 0. This happens for some audio codecs where a
+  //     negative presentation timestamp signals that the sample is not supposed
+  //     to be shown, i.e. for audio priming. EditList is needed to encode
+  //     negative timestamps.
+  // [1] https://crbug.com/718641, fixed but behind MseBufferByPts, still not
+  //     enabled as of M67.
+  // [2] This is actually a bug, see https://crbug.com/354518. It looks like
+  //     Chrome is planning to enable the fix for [1] before addressing this
+  //     bug, so we are safe.
+  // [3] ISO 14496-12:2015 8.6.6.1
+  //     It is recommended that such an edit be used to establish a presentation
+  //     time of 0 for the first presented sample, when composition offsets are
+  //     used.
+  // [4] ISO 23009-19:2018 7.5.13
+  //     In two cases, an EditBox containing a single EditListBox with the
+  //     following constraints may be present in the CMAF header of a CMAF track
+  //     to adjust the presentation time of all media samples in the CMAF track.
+  //     a) The first case is a video CMAF track file using v0 TrackRunBoxes
+  //        with positive composition offsets to reorder video media samples.
+  //     b) The second case is an audio CMAF track where each media sample's
+  //        presentation time does not equal its composition time.
+  const int64_t pts_dts_offset = pts - dts;
+  if (pts_dts_offset > 0) {
+    if (pts < 0) {
+      LOG(ERROR) << "Negative presentation timestamp (" << pts
+                 << ") is not supported when there is an offset between "
+                    "presentation timestamp and decoding timestamp ("
+                 << dts << ").";
+      return Status(error::MUXER_FAILURE,
+                    "Unsupported negative pts when there is an offset between "
+                    "pts and dts.");
+    }
+    edit_list_offset_ = pts_dts_offset;
+    return Status::OK;
+  }
+  if (pts_dts_offset < 0) {
+    LOG(ERROR) << "presentation timestamp (" << pts
+               << ") is not supposed to be greater than decoding timestamp ("
+               << dts << ").";
+    return Status(error::MUXER_FAILURE, "Not expecting pts < dts.");
+  }
+  edit_list_offset_ = std::max(-sample.pts(), static_cast<int64_t>(0));
   return Status::OK;
-}
-
-Status MP4Muxer::AddSample(size_t stream_id,
-                           std::shared_ptr<MediaSample> sample) {
-  DCHECK(segmenter_);
-  return segmenter_->AddSample(stream_id, sample);
-}
-
-Status MP4Muxer::FinalizeSegment(size_t stream_id,
-                                 std::shared_ptr<SegmentInfo> segment_info) {
-  DCHECK(segmenter_);
-  VLOG(3) << "Finalize " << (segment_info->is_subsegment ? "sub" : "")
-          << "segment " << segment_info->start_timestamp << " duration "
-          << segment_info->duration;
-  return segmenter_->FinalizeSegment(stream_id, std::move(segment_info));
 }
 
 void MP4Muxer::InitializeTrak(const StreamInfo* info, Track* trak) {
@@ -251,7 +385,7 @@ void MP4Muxer::InitializeTrak(const StreamInfo* info, Track* trak) {
   }
 }
 
-void MP4Muxer::GenerateVideoTrak(const VideoStreamInfo* video_info,
+bool MP4Muxer::GenerateVideoTrak(const VideoStreamInfo* video_info,
                                  Track* trak,
                                  uint32_t track_id) {
   InitializeTrak(video_info, trak);
@@ -296,9 +430,10 @@ void MP4Muxer::GenerateVideoTrak(const VideoStreamInfo* video_info,
     GenerateSinf(entry.format, video_info->encryption_config(), &entry.sinf);
     entry.format = FOURCC_encv;
   }
+  return true;
 }
 
-void MP4Muxer::GenerateAudioTrak(const AudioStreamInfo* audio_info,
+bool MP4Muxer::GenerateAudioTrak(const AudioStreamInfo* audio_info,
                                  Track* trak,
                                  uint32_t track_id) {
   InitializeTrak(audio_info, trak);
@@ -309,14 +444,17 @@ void MP4Muxer::GenerateAudioTrak(const AudioStreamInfo* audio_info,
   audio.format =
       CodecToFourCC(audio_info->codec(), H26xStreamFormat::kUnSpecified);
   switch(audio_info->codec()){
-    case kCodecAAC:
-      audio.esds.es_descriptor.set_object_type(kISO_14496_3);  // MPEG4 AAC.
+    case kCodecAAC: {
       audio.esds.es_descriptor.set_esid(track_id);
-      audio.esds.es_descriptor.set_decoder_specific_info(
+      DecoderConfigDescriptor* decoder_config =
+          audio.esds.es_descriptor.mutable_decoder_config_descriptor();
+      decoder_config->set_object_type(ObjectType::kISO_14496_3);  // MPEG4 AAC.
+      decoder_config->set_max_bitrate(audio_info->max_bitrate());
+      decoder_config->set_avg_bitrate(audio_info->avg_bitrate());
+      decoder_config->mutable_decoder_specific_info_descriptor()->set_data(
           audio_info->codec_config());
-      audio.esds.es_descriptor.set_max_bitrate(audio_info->max_bitrate());
-      audio.esds.es_descriptor.set_avg_bitrate(audio_info->avg_bitrate());
       break;
+    }
     case kCodecDTSC:
     case kCodecDTSH:
     case kCodecDTSL:
@@ -334,16 +472,26 @@ void MP4Muxer::GenerateAudioTrak(const AudioStreamInfo* audio_info,
     case kCodecEAC3:
       audio.dec3.data = audio_info->codec_config();
       break;
+    case kCodecFlac:
+      audio.dfla.data = audio_info->codec_config();
+      break;
     case kCodecOpus:
       audio.dops.opus_identification_header = audio_info->codec_config();
       break;
     default:
-      NOTIMPLEMENTED();
-      break;
+      NOTIMPLEMENTED() << " Unsupported audio codec " << audio_info->codec();
+      return false;
   }
 
-  audio.channelcount = audio_info->num_channels();
-  audio.samplesize = audio_info->sample_bits();
+  if (audio_info->codec() == kCodecAC3 || audio_info->codec() == kCodecEAC3) {
+    // AC3 and EC3 does not fill in actual channel count and sample size in
+    // sample description entry. Instead, two constants are used.
+    audio.channelcount = 2;
+    audio.samplesize = 16;
+  } else {
+    audio.channelcount = audio_info->num_channels();
+    audio.samplesize = audio_info->sample_bits();
+  }
   audio.samplerate = audio_info->sampling_frequency();
   SampleTable& sample_table = trak->media.information.sample_table;
   SampleDescription& sample_description = sample_table.description;
@@ -361,39 +509,21 @@ void MP4Muxer::GenerateAudioTrak(const AudioStreamInfo* audio_info,
     entry.format = FOURCC_enca;
   }
 
-  // Opus requires at least one sample group description box and at least one
-  // sample to group box with grouping type 'roll' within sample table box.
-  if (audio_info->codec() == kCodecOpus) {
+  if (audio_info->seek_preroll_ns() > 0) {
     sample_table.sample_group_descriptions.resize(1);
     SampleGroupDescription& sample_group_description =
         sample_table.sample_group_descriptions.back();
     sample_group_description.grouping_type = FOURCC_roll;
     sample_group_description.audio_roll_recovery_entries.resize(1);
-    // The roll distance is expressed in sample units and always takes negative
-    // values.
-    const uint64_t kNanosecondsPerSecond = 1000000000ull;
     sample_group_description.audio_roll_recovery_entries[0].roll_distance =
-        (0 - (audio_info->seek_preroll_ns() * audio.samplerate +
-              kNanosecondsPerSecond / 2)) /
-        kNanosecondsPerSecond;
-
-    sample_table.sample_to_groups.resize(1);
-    SampleToGroup& sample_to_group = sample_table.sample_to_groups.back();
-    sample_to_group.grouping_type = FOURCC_roll;
-
-    sample_to_group.entries.resize(1);
-    SampleToGroupEntry& sample_to_group_entry = sample_to_group.entries.back();
-    // All samples are in track fragments.
-    sample_to_group_entry.sample_count = 0;
-    sample_to_group_entry.group_description_index =
-        SampleToGroupEntry::kTrackGroupDescriptionIndexBase + 1;
-  } else if (audio_info->seek_preroll_ns() != 0) {
-    LOG(WARNING) << "Unexpected seek preroll for codec " << audio_info->codec();
-    return;
+        GetRollDistance(audio_info->seek_preroll_ns(), audio.samplerate);
+    // sample to group box is not allowed in the init segment per CMAF
+    // specification. It is put in the fragment instead.
   }
+  return true;
 }
 
-void MP4Muxer::GenerateTextTrak(const TextStreamInfo* text_info,
+bool MP4Muxer::GenerateTextTrak(const TextStreamInfo* text_info,
                                 Track* trak,
                                 uint32_t track_id) {
   InitializeTrak(text_info, trak);
@@ -402,8 +532,19 @@ void MP4Muxer::GenerateTextTrak(const TextStreamInfo* text_info,
     // Handle WebVTT.
     TextSampleEntry webvtt;
     webvtt.format = FOURCC_wvtt;
-    webvtt.config.config.assign(text_info->codec_config().begin(),
-                                text_info->codec_config().end());
+
+    // 14496-30:2014 7.5 Web Video Text Tracks Sample entry format.
+    // In the sample entry, a WebVTT configuration box must occur, carrying
+    // exactly the lines of the WebVTT file header, i.e. all text lines up to
+    // but excluding the 'two or more line terminators' that end the header.
+    webvtt.config.config = "WEBVTT";
+    // The spec does not define a way to carry STYLE and REGION information in
+    // the mp4 container.
+    if (!text_info->codec_config().empty()) {
+      LOG(INFO) << "Skipping possible style / region configuration as the spec "
+                   "does not define a way to carry them inside ISO-BMFF files.";
+    }
+
     // TODO(rkuroiwa): This should be the source file URI(s). Putting bogus
     // string for now so that the box will be there for samples with overlapping
     // cues.
@@ -412,10 +553,11 @@ void MP4Muxer::GenerateTextTrak(const TextStreamInfo* text_info,
         trak->media.information.sample_table.description;
     sample_description.type = kText;
     sample_description.text_entries.push_back(webvtt);
-    return;
+    return true;
   }
   NOTIMPLEMENTED() << text_info->codec_string()
                    << " handling not implemented yet.";
+  return false;
 }
 
 base::Optional<Range> MP4Muxer::GetInitRangeStartAndEnd() {

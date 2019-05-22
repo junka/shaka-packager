@@ -21,17 +21,37 @@ namespace media {
 
 enum class StreamDataType {
   kUnknown,
-  kPeriodInfo,
   kStreamInfo,
   kMediaSample,
   kTextSample,
-  kMediaEvent,
   kSegmentInfo,
+  kScte35Event,
+  kCueEvent,
 };
 
-// TODO(kqyang): Define these structures.
-struct PeriodInfo {};
-struct MediaEvent {};
+std::string StreamDataTypeToString(StreamDataType type);
+
+// Scte35Event represents cuepoint markers in input streams. It will be used
+// to represent out of band cuepoint markers too.
+struct Scte35Event {
+  std::string id;
+  // Segmentation type id from SCTE35 segmentation descriptor.
+  int type = 0;
+  double start_time_in_seconds = 0;
+  double duration_in_seconds = 0;
+  std::string cue_data;
+};
+
+enum class CueEventType { kCueIn, kCueOut, kCuePoint };
+
+// In server-based model, Chunking Handler consolidates SCTE-35 events and
+// generates CueEvent before an ad is about to be inserted.
+struct CueEvent {
+  CueEventType type = CueEventType::kCuePoint;
+  double time_in_seconds;
+  std::string cue_data;
+};
+
 struct SegmentInfo {
   bool is_subsegment = false;
   bool is_encrypted = false;
@@ -48,12 +68,72 @@ struct StreamData {
   size_t stream_index = static_cast<size_t>(-1);
   StreamDataType stream_data_type = StreamDataType::kUnknown;
 
-  std::shared_ptr<PeriodInfo> period_info;
-  std::shared_ptr<StreamInfo> stream_info;
-  std::shared_ptr<MediaSample> media_sample;
-  std::shared_ptr<TextSample> text_sample;
-  std::shared_ptr<MediaEvent> media_event;
-  std::shared_ptr<SegmentInfo> segment_info;
+  std::shared_ptr<const StreamInfo> stream_info;
+  std::shared_ptr<const MediaSample> media_sample;
+  std::shared_ptr<const TextSample> text_sample;
+  std::shared_ptr<const SegmentInfo> segment_info;
+  std::shared_ptr<const Scte35Event> scte35_event;
+  std::shared_ptr<const CueEvent> cue_event;
+
+  static std::unique_ptr<StreamData> FromStreamInfo(
+      size_t stream_index,
+      std::shared_ptr<const StreamInfo> stream_info) {
+    std::unique_ptr<StreamData> stream_data(new StreamData);
+    stream_data->stream_index = stream_index;
+    stream_data->stream_data_type = StreamDataType::kStreamInfo;
+    stream_data->stream_info = std::move(stream_info);
+    return stream_data;
+  }
+
+  static std::unique_ptr<StreamData> FromMediaSample(
+      size_t stream_index,
+      std::shared_ptr<const MediaSample> media_sample) {
+    std::unique_ptr<StreamData> stream_data(new StreamData);
+    stream_data->stream_index = stream_index;
+    stream_data->stream_data_type = StreamDataType::kMediaSample;
+    stream_data->media_sample = std::move(media_sample);
+    return stream_data;
+  }
+
+  static std::unique_ptr<StreamData> FromTextSample(
+      size_t stream_index,
+      std::shared_ptr<const TextSample> text_sample) {
+    std::unique_ptr<StreamData> stream_data(new StreamData);
+    stream_data->stream_index = stream_index;
+    stream_data->stream_data_type = StreamDataType::kTextSample;
+    stream_data->text_sample = std::move(text_sample);
+    return stream_data;
+  }
+
+  static std::unique_ptr<StreamData> FromSegmentInfo(
+      size_t stream_index,
+      std::shared_ptr<const SegmentInfo> segment_info) {
+    std::unique_ptr<StreamData> stream_data(new StreamData);
+    stream_data->stream_index = stream_index;
+    stream_data->stream_data_type = StreamDataType::kSegmentInfo;
+    stream_data->segment_info = std::move(segment_info);
+    return stream_data;
+  }
+
+  static std::unique_ptr<StreamData> FromScte35Event(
+      size_t stream_index,
+      std::shared_ptr<const Scte35Event> scte35_event) {
+    std::unique_ptr<StreamData> stream_data(new StreamData);
+    stream_data->stream_index = stream_index;
+    stream_data->stream_data_type = StreamDataType::kScte35Event;
+    stream_data->scte35_event = std::move(scte35_event);
+    return stream_data;
+  }
+
+  static std::unique_ptr<StreamData> FromCueEvent(
+      size_t stream_index,
+      std::shared_ptr<const CueEvent> cue_event) {
+    std::unique_ptr<StreamData> stream_data(new StreamData);
+    stream_data->stream_index = stream_index;
+    stream_data->stream_data_type = StreamDataType::kCueEvent;
+    stream_data->cue_event = std::move(cue_event);
+    return stream_data;
+  }
 };
 
 /// MediaHandler is the base media processing unit. Media handlers transform
@@ -66,10 +146,10 @@ struct StreamData {
 ///      The number of outputs must be equal to the number of inputs. The
 ///      output stream at a specific index comes from the input stream at the
 ///      same index. Different streams usually share a common resource, although
-///      they may be independent. One example of this is encryptor handler.
+///      they may be independent. One example of this is encryption handler.
 ///   3) Single input multiple outputs
-///      The input stream is splitted into multiple output streams. One example
-///      of this is trick play handler.
+///      The input stream is split into multiple output streams. One example
+///      of this is the replicator media handler.
 /// Other types of media handlers are disallowed and not supported.
 class MediaHandler {
  public:
@@ -80,7 +160,7 @@ class MediaHandler {
   Status SetHandler(size_t output_stream_index,
                     std::shared_ptr<MediaHandler> handler);
 
-  /// Connect downstream handler to the next availble output stream index.
+  /// Connect downstream handler to the next available output stream index.
   Status AddHandler(std::shared_ptr<MediaHandler> handler) {
     return SetHandler(next_output_stream_index_, handler);
   }
@@ -91,6 +171,9 @@ class MediaHandler {
 
   /// Validate if the handler is connected to its upstream handler.
   bool IsConnected() { return num_input_streams_ > 0; }
+
+  static Status Chain(
+      std::initializer_list<std::shared_ptr<MediaHandler>> list);
 
  protected:
   /// Internal implementation of initialize. Note that it should only initialize
@@ -111,73 +194,60 @@ class MediaHandler {
 
   /// Dispatch the stream data to downstream handlers. Note that
   /// stream_data.stream_index should be the output stream index.
-  Status Dispatch(std::unique_ptr<StreamData> stream_data);
-
-  /// Dispatch the period info to downstream handlers.
-  Status DispatchPeriodInfo(size_t stream_index,
-                            std::shared_ptr<PeriodInfo> period_info) {
-    std::unique_ptr<StreamData> stream_data(new StreamData);
-    stream_data->stream_index = stream_index;
-    stream_data->stream_data_type = StreamDataType::kPeriodInfo;
-    stream_data->period_info = std::move(period_info);
-    return Dispatch(std::move(stream_data));
-  }
+  Status Dispatch(std::unique_ptr<StreamData> stream_data) const;
 
   /// Dispatch the stream info to downstream handlers.
-  Status DispatchStreamInfo(size_t stream_index,
-                            std::shared_ptr<StreamInfo> stream_info) {
-    std::unique_ptr<StreamData> stream_data(new StreamData);
-    stream_data->stream_index = stream_index;
-    stream_data->stream_data_type = StreamDataType::kStreamInfo;
-    stream_data->stream_info = std::move(stream_info);
-    return Dispatch(std::move(stream_data));
+  Status DispatchStreamInfo(
+      size_t stream_index,
+      std::shared_ptr<const StreamInfo> stream_info) const {
+    return Dispatch(
+        StreamData::FromStreamInfo(stream_index, std::move(stream_info)));
   }
 
   /// Dispatch the media sample to downstream handlers.
-  Status DispatchMediaSample(size_t stream_index,
-                             std::shared_ptr<MediaSample> media_sample) {
-    std::unique_ptr<StreamData> stream_data(new StreamData);
-    stream_data->stream_index = stream_index;
-    stream_data->stream_data_type = StreamDataType::kMediaSample;
-    stream_data->media_sample = std::move(media_sample);
-    return Dispatch(std::move(stream_data));
+  Status DispatchMediaSample(
+      size_t stream_index,
+      std::shared_ptr<const MediaSample> media_sample) const {
+    return Dispatch(
+        StreamData::FromMediaSample(stream_index, std::move(media_sample)));
   }
 
-  /// Dispatch the text sample to downsream handlers.
+  /// Dispatch the text sample to downstream handlers.
   // DispatchTextSample should only be override for testing.
-  Status DispatchTextSample(size_t stream_index,
-                            std::shared_ptr<TextSample> text_sample) {
-    std::unique_ptr<StreamData> stream_data(new StreamData);
-    stream_data->stream_index = stream_index;
-    stream_data->stream_data_type = StreamDataType::kTextSample;
-    stream_data->text_sample = std::move(text_sample);
-    return Dispatch(std::move(stream_data));
-  }
-
-  /// Dispatch the media event to downstream handlers.
-  Status DispatchMediaEvent(size_t stream_index,
-                            std::shared_ptr<MediaEvent> media_event) {
-    std::unique_ptr<StreamData> stream_data(new StreamData);
-    stream_data->stream_index = stream_index;
-    stream_data->stream_data_type = StreamDataType::kMediaEvent;
-    stream_data->media_event = std::move(media_event);
-    return Dispatch(std::move(stream_data));
+  Status DispatchTextSample(
+      size_t stream_index,
+      std::shared_ptr<const TextSample> text_sample) const {
+    return Dispatch(
+        StreamData::FromTextSample(stream_index, std::move(text_sample)));
   }
 
   /// Dispatch the segment info to downstream handlers.
-  Status DispatchSegmentInfo(size_t stream_index,
-                             std::shared_ptr<SegmentInfo> segment_info) {
-    std::unique_ptr<StreamData> stream_data(new StreamData);
-    stream_data->stream_index = stream_index;
-    stream_data->stream_data_type = StreamDataType::kSegmentInfo;
-    stream_data->segment_info = std::move(segment_info);
-    return Dispatch(std::move(stream_data));
+  Status DispatchSegmentInfo(
+      size_t stream_index,
+      std::shared_ptr<const SegmentInfo> segment_info) const {
+    return Dispatch(
+        StreamData::FromSegmentInfo(stream_index, std::move(segment_info)));
+  }
+
+  /// Dispatch the scte35 event to downstream handlers.
+  Status DispatchScte35Event(
+      size_t stream_index,
+      std::shared_ptr<const Scte35Event> scte35_event) const {
+    return Dispatch(
+        StreamData::FromScte35Event(stream_index, std::move(scte35_event)));
+  }
+
+  /// Dispatch the cue event to downstream handlers.
+  Status DispatchCueEvent(size_t stream_index,
+                          std::shared_ptr<const CueEvent> cue_event) const {
+    return Dispatch(
+        StreamData::FromCueEvent(stream_index, std::move(cue_event)));
   }
 
   /// Flush the downstream connected at the specified output stream index.
   Status FlushDownstream(size_t output_stream_index);
 
-  /// Flush all connected downstreams.
+  /// Flush all connected downstream handlers.
   Status FlushAllDownstreams();
 
   bool initialized() { return initialized_; }

@@ -30,16 +30,23 @@ deps = {
   "src/packager/testing/gtest":
     Var("chromium_git") + "/external/github.com/google/googletest@6f8a66431cb592dad629028a50b3dd418a408c87",
 
+  # Keep bundled binutil scripts but not downloading actual binaries by default.
+  # Automatic downloading of binutils has been causing problems for some users:
+  # #164, #412, #440. Using bundled binutils helps reduce linking time, but
+  # packager codebase is relatively small, so the gain is not significant.
+  # User can still enable the usage of bundled binutils by running
+  # 'python src/packager/third_party/binutils/download.py' and set
+  # 'linux_use_bundled_binutils' and 'linux_use_bundled_gold' to 1 in GYP_DEFINES.
   "src/packager/third_party/binutils":
     Var("chromium_git") + "/chromium/src/third_party/binutils@8d77853bc9415bcb7bb4206fa2901de7603387db",
 
   # Make sure the version matches the one in
   # src/packager/third_party/boringssl, which contains perl generated files.
   "src/packager/third_party/boringssl/src":
-    Var("github") + "/google/boringssl@3cab5572b1fcf5a8f6018529dc30dc8d21b2a4bd",
+    Var("github") + "/google/boringssl@fc9c67599d9bdeb2e0467085133b81a8e28f77a4",
 
   "src/packager/third_party/curl/source":
-    Var("github") + "/curl/curl@79e63a53bb9598af863b0afe49ad662795faeef4",  #7.50.0
+    Var("github") + "/curl/curl@62c07b5743490ce373910f469abc8cdc759bec2b",  #7.57.0
 
   "src/packager/third_party/gflags/src":
     Var("chromium_git") + "/external/github.com/gflags/gflags@03bebcb065c83beff83d50ae025a55a4bf94dfca",
@@ -61,7 +68,7 @@ deps = {
     Var("chromium_git") + "/chromium/src/third_party/zlib@830b5c25b5fbe37e032ea09dd011d57042dd94df",  #408157
 
   "src/packager/tools/clang":
-    Var("chromium_git") + "/chromium/src/tools/clang@0b06ba9e49a0cba97f6accd71a974c1623d69e16",  #409802
+    Var("chromium_git") + "/chromium/src/tools/clang@723b25997f0aab45fe1776a0f74a14782e350f8f",  #513983
 
   "src/packager/tools/gyp":
     Var("chromium_git") + "/external/gyp@e7079f0e0e14108ab0dba58728ff219637458563",
@@ -98,18 +105,8 @@ hooks = [
     'pattern': '.',
     'action': ['python', 'src/packager/build/mac_toolchain.py'],
   },
-  # Pull binutils for linux.
-  {
-    'name': 'binutils',
-    'pattern': 'src/packager/third_party/binutils',
-    'action': [
-        'python',
-        'src/packager/third_party/binutils/download.py',
-    ],
-  },
   {
     # Pull clang if needed or requested via GYP_DEFINES (GYP_DEFINES="clang=1").
-    # Note: On Win, this should run after win_toolchain, as it may use it.
     "name": "clang",
     "pattern": ".",
     "action": ["python", "src/packager/tools/clang/scripts/update.py", "--if-needed"],

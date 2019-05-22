@@ -15,7 +15,6 @@
 
 DECLARE_bool(enable_widevine_encryption);
 DECLARE_bool(enable_widevine_decryption);
-DECLARE_bool(include_common_pssh);
 DECLARE_string(key_server_url);
 DECLARE_hex_bytes(content_id);
 DECLARE_string(policy);
@@ -28,6 +27,7 @@ DECLARE_hex_bytes(aes_signing_iv);
 DECLARE_string(rsa_signing_key_path);
 DECLARE_int32(crypto_period_duration);
 DECLARE_hex_bytes(group_id);
+DECLARE_bool(enable_entitlement_license);
 
 namespace shaka {
 

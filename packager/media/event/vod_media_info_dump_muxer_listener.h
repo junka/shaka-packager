@@ -8,8 +8,8 @@
 // protobuf and dumps it to a file.
 // This is specifically for VOD.
 
-#ifndef MEDIA_EVENT_VOD_MEDIA_INFO_DUMP_MUXER_LISTENER_H_
-#define MEDIA_EVENT_VOD_MEDIA_INFO_DUMP_MUXER_LISTENER_H_
+#ifndef PACKAGER_MEDIA_EVENT_VOD_MEDIA_INFO_DUMP_MUXER_LISTENER_H_
+#define PACKAGER_MEDIA_EVENT_VOD_MEDIA_INFO_DUMP_MUXER_LISTENER_H_
 
 #include <memory>
 #include <string>
@@ -47,9 +47,11 @@ class VodMediaInfoDumpMuxerListener : public MuxerListener {
   void OnMediaEnd(const MediaRanges& media_ranges,
                   float duration_seconds) override;
   void OnNewSegment(const std::string& file_name,
-                    uint64_t start_time,
-                    uint64_t duration,
+                    int64_t start_time,
+                    int64_t duration,
                     uint64_t segment_file_size) override;
+  void OnKeyFrame(int64_t timestamp, uint64_t start_byte_offset, uint64_t size);
+  void OnCueEvent(int64_t timestamp, const std::string& cue_data) override;
   /// @}
 
   /// Write @a media_info to @a output_file_path in human readable format.
@@ -64,8 +66,9 @@ class VodMediaInfoDumpMuxerListener : public MuxerListener {
  private:
   std::string output_file_name_;
   std::unique_ptr<MediaInfo> media_info_;
+  uint64_t max_bitrate_ = 0;
 
-  bool is_encrypted_;
+  bool is_encrypted_ = false;
   // Storage for values passed to OnEncryptionInfoReady().
   FourCC protection_scheme_;
   std::vector<uint8_t> default_key_id_;
@@ -77,4 +80,4 @@ class VodMediaInfoDumpMuxerListener : public MuxerListener {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_EVENT_VOD_MEDIA_INFO_DUMP_MUXER_LISTENER_H_
+#endif  // PACKAGER_MEDIA_EVENT_VOD_MEDIA_INFO_DUMP_MUXER_LISTENER_H_

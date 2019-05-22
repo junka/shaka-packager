@@ -10,6 +10,8 @@
 #include "packager/media/base/audio_stream_info.h"
 #include "packager/media/base/video_stream_info.h"
 #include "packager/media/event/mock_muxer_listener.h"
+#include "packager/media/formats/mp2t/pes_packet.h"
+#include "packager/media/formats/mp2t/program_map_table_writer.h"
 #include "packager/media/formats/mp2t/ts_segmenter.h"
 #include "packager/status_test_util.h"
 
@@ -33,6 +35,7 @@ const uint8_t kExtraData[] = {
     0x00,
 };
 const int kTrackId = 0;
+const uint32_t kZeroTransportStreamTimestampOffset = 0;
 const uint32_t kTimeScale = 90000;
 const uint64_t kDuration = 180000;
 const char kCodecString[] = "avc1";
@@ -51,8 +54,11 @@ const uint8_t kAnyData[] = {
 
 class MockPesPacketGenerator : public PesPacketGenerator {
  public:
+  MockPesPacketGenerator()
+      : PesPacketGenerator(kZeroTransportStreamTimestampOffset) {}
+
   MOCK_METHOD1(Initialize, bool(const StreamInfo& info));
-  MOCK_METHOD1(PushSample, bool(std::shared_ptr<MediaSample> sample));
+  MOCK_METHOD1(PushSample, bool(const MediaSample& sample));
 
   MOCK_METHOD0(NumberOfReadyPesPackets, size_t());
 
@@ -69,7 +75,11 @@ class MockPesPacketGenerator : public PesPacketGenerator {
 
 class MockTsWriter : public TsWriter {
  public:
-  MOCK_METHOD1(Initialize, bool(const StreamInfo& stream_info));
+  MockTsWriter()
+      : TsWriter(std::unique_ptr<ProgramMapTableWriter>(
+            // Create a bogus pmt writer, which we don't really care.
+            new VideoProgramMapTableWriter(kUnknownCodec))) {}
+
   MOCK_METHOD1(NewSegment, bool(const std::string& file_name));
   MOCK_METHOD0(SignalEncrypted, void());
   MOCK_METHOD0(FinalizeSegment, bool());
@@ -105,11 +115,9 @@ TEST_F(TsSegmenterTest, Initialize) {
   options.segment_template = "file$Number$.ts";
   TsSegmenter segmenter(options, nullptr);
 
-  EXPECT_CALL(*mock_ts_writer_, Initialize(_)).WillOnce(Return(true));
   EXPECT_CALL(*mock_pes_packet_generator_, Initialize(_))
       .WillOnce(Return(true));
 
-  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
   segmenter.InjectPesPacketGeneratorForTesting(
       std::move(mock_pes_packet_generator_));
 
@@ -126,7 +134,6 @@ TEST_F(TsSegmenterTest, AddSample) {
   options.segment_template = "file$Number$.ts";
   TsSegmenter segmenter(options, nullptr);
 
-  EXPECT_CALL(*mock_ts_writer_, Initialize(_)).WillOnce(Return(true));
   EXPECT_CALL(*mock_pes_packet_generator_, Initialize(_))
       .WillOnce(Return(true));
 
@@ -156,12 +163,12 @@ TEST_F(TsSegmenterTest, AddSample) {
   EXPECT_CALL(*mock_pes_packet_generator_, GetNextPesPacketMock())
       .WillOnce(Return(new PesPacket()));
 
-  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
   segmenter.InjectPesPacketGeneratorForTesting(
       std::move(mock_pes_packet_generator_));
 
   EXPECT_OK(segmenter.Initialize(*stream_info));
-  EXPECT_OK(segmenter.AddSample(sample));
+  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
+  EXPECT_OK(segmenter.AddSample(*sample));
 }
 
 // This will add one sample then finalize segment then add another sample.
@@ -182,7 +189,6 @@ TEST_F(TsSegmenterTest, PassedSegmentDuration) {
 
   const uint32_t kFirstPts = 1000;
 
-  EXPECT_CALL(*mock_ts_writer_, Initialize(_)).WillOnce(Return(true));
   EXPECT_CALL(*mock_pes_packet_generator_, Initialize(_))
       .WillOnce(Return(true));
 
@@ -253,13 +259,13 @@ TEST_F(TsSegmenterTest, PassedSegmentDuration) {
       .InSequence(pes_packet_sequence)
       .WillOnce(Return(new PesPacket()));
 
-  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
   segmenter.InjectPesPacketGeneratorForTesting(
       std::move(mock_pes_packet_generator_));
   EXPECT_OK(segmenter.Initialize(*stream_info));
-  EXPECT_OK(segmenter.AddSample(sample1));
+  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
+  EXPECT_OK(segmenter.AddSample(*sample1));
   EXPECT_OK(segmenter.FinalizeSegment(kFirstPts, sample1->duration()));
-  EXPECT_OK(segmenter.AddSample(sample2));
+  EXPECT_OK(segmenter.AddSample(*sample2));
 }
 
 // Finalize right after Initialize(). The writer will not be initialized.
@@ -273,7 +279,6 @@ TEST_F(TsSegmenterTest, InitializeThenFinalize) {
   options.segment_template = "file$Number$.ts";
   TsSegmenter segmenter(options, nullptr);
 
-  EXPECT_CALL(*mock_ts_writer_, Initialize(_)).WillOnce(Return(true));
   EXPECT_CALL(*mock_pes_packet_generator_, Initialize(_))
       .WillOnce(Return(true));
 
@@ -281,7 +286,6 @@ TEST_F(TsSegmenterTest, InitializeThenFinalize) {
   ON_CALL(*mock_pes_packet_generator_, NumberOfReadyPesPackets())
       .WillByDefault(Return(0));
 
-  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
   segmenter.InjectPesPacketGeneratorForTesting(
       std::move(mock_pes_packet_generator_));
   EXPECT_OK(segmenter.Initialize(*stream_info));
@@ -302,7 +306,6 @@ TEST_F(TsSegmenterTest, FinalizeSegment) {
   options.segment_template = "file$Number$.ts";
   TsSegmenter segmenter(options, nullptr);
 
-  EXPECT_CALL(*mock_ts_writer_, Initialize(_)).WillOnce(Return(true));
   EXPECT_CALL(*mock_pes_packet_generator_, Initialize(_))
       .WillOnce(Return(true));
 
@@ -312,10 +315,10 @@ TEST_F(TsSegmenterTest, FinalizeSegment) {
       .WillOnce(Return(0u));
   EXPECT_CALL(*mock_ts_writer_, FinalizeSegment()).WillOnce(Return(true));
 
-  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
   segmenter.InjectPesPacketGeneratorForTesting(
       std::move(mock_pes_packet_generator_));
   EXPECT_OK(segmenter.Initialize(*stream_info));
+  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
   segmenter.SetTsWriterFileOpenedForTesting(true);
   EXPECT_OK(segmenter.FinalizeSegment(0, 100 /* arbitrary duration */));
 }
@@ -333,7 +336,6 @@ TEST_F(TsSegmenterTest, EncryptedSample) {
   MockMuxerListener mock_listener;
   TsSegmenter segmenter(options, &mock_listener);
 
-  ON_CALL(*mock_ts_writer_, Initialize(_)).WillByDefault(Return(true));
   ON_CALL(*mock_ts_writer_, NewSegment(_)).WillByDefault(Return(true));
   ON_CALL(*mock_ts_writer_, FinalizeSegment()).WillByDefault(Return(true));
   ON_CALL(*mock_ts_writer_, AddPesPacketMock(_)).WillByDefault(Return(true));
@@ -390,18 +392,18 @@ TEST_F(TsSegmenterTest, EncryptedSample) {
 
   MockTsWriter* mock_ts_writer_raw = mock_ts_writer_.get();
 
-  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
   segmenter.InjectPesPacketGeneratorForTesting(
       std::move(mock_pes_packet_generator_));
 
   EXPECT_OK(segmenter.Initialize(*stream_info));
-  EXPECT_OK(segmenter.AddSample(sample1));
+  segmenter.InjectTsWriterForTesting(std::move(mock_ts_writer_));
+  EXPECT_OK(segmenter.AddSample(*sample1));
 
   EXPECT_OK(segmenter.FinalizeSegment(1, sample1->duration()));
   // Signal encrypted if sample is encrypted.
   EXPECT_CALL(*mock_ts_writer_raw, SignalEncrypted());
   sample2->set_is_encrypted(true);
-  EXPECT_OK(segmenter.AddSample(sample2));
+  EXPECT_OK(segmenter.AddSample(*sample2));
 }
 
 }  // namespace mp2t

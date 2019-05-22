@@ -6,8 +6,30 @@
 
 #include "packager/media/base/media_handler.h"
 
+#include "packager/status_macros.h"
+
 namespace shaka {
 namespace media {
+
+std::string StreamDataTypeToString(StreamDataType type) {
+  switch (type) {
+    case StreamDataType::kStreamInfo:
+      return "stream info";
+    case StreamDataType::kMediaSample:
+      return "media sample";
+    case StreamDataType::kTextSample:
+      return "text sample";
+    case StreamDataType::kSegmentInfo:
+      return "segment info";
+    case StreamDataType::kScte35Event:
+      return "scte35 event";
+    case StreamDataType::kCueEvent:
+      return "cue event";
+    case StreamDataType::kUnknown:
+      return "unknown";
+  }
+  return "unknown";
+}
 
 Status MediaHandler::SetHandler(size_t output_stream_index,
                                 std::shared_ptr<MediaHandler> handler) {
@@ -38,6 +60,26 @@ Status MediaHandler::Initialize() {
   return Status::OK;
 }
 
+Status MediaHandler::Chain(
+    std::initializer_list<std::shared_ptr<MediaHandler>> list) {
+  std::shared_ptr<MediaHandler> previous;
+
+  for (auto& next : list) {
+    // Skip null entries.
+    if (!next) {
+      continue;
+    }
+
+    if (previous) {
+      RETURN_IF_ERROR(previous->AddHandler(next));
+    }
+
+    previous = std::move(next);
+  }
+
+  return Status::OK;
+}
+
 Status MediaHandler::OnFlushRequest(size_t input_stream_index) {
   // The default implementation treats the output stream index to be identical
   // to the input stream index, which is true for most handlers.
@@ -49,7 +91,7 @@ bool MediaHandler::ValidateOutputStreamIndex(size_t stream_index) const {
   return stream_index < num_input_streams_;
 }
 
-Status MediaHandler::Dispatch(std::unique_ptr<StreamData> stream_data) {
+Status MediaHandler::Dispatch(std::unique_ptr<StreamData> stream_data) const {
   size_t output_stream_index = stream_data->stream_index;
   auto handler_it = output_handlers_.find(output_stream_index);
   if (handler_it == output_handlers_.end()) {
@@ -78,6 +120,5 @@ Status MediaHandler::FlushAllDownstreams() {
   }
   return Status::OK;
 }
-
 }  // namespace media
 }  // namespace shaka

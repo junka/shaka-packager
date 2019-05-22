@@ -46,7 +46,7 @@ class TsSegmenter {
 
   /// @param sample gets added to this object.
   /// @return OK on success.
-  Status AddSample(std::shared_ptr<MediaSample> sample);
+  Status AddSample(const MediaSample& sample);
 
   /// Flush all the samples that are (possibly) buffered and write them to the
   /// current segment, this will close the file. If a file is not already opened
@@ -80,6 +80,11 @@ class TsSegmenter {
   const MuxerOptions& muxer_options_;
   MuxerListener* const listener_;
 
+  // Codec for the stream.
+  Codec codec_ = kUnknownCodec;
+  std::vector<uint8_t> audio_codec_config_;
+
+  const uint32_t transport_stream_timestamp_offset_ = 0;
   // Scale used to scale the input stream to TS's timesccale (which is 90000).
   // Used for calculating the duration in seconds fo the current segment.
   double timescale_scale_ = 1.0;

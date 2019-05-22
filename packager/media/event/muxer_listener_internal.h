@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_EVENT_MUXER_LISTENER_INTERNAL_H_
-#define MEDIA_EVENT_MUXER_LISTENER_INTERNAL_H_
+#ifndef PACKAGER_MEDIA_EVENT_MUXER_LISTENER_INTERNAL_H_
+#define PACKAGER_MEDIA_EVENT_MUXER_LISTENER_INTERNAL_H_
 
 #include <stdint.h>
 
@@ -33,6 +33,11 @@ bool GenerateMediaInfo(const MuxerOptions& muxer_options,
                        MuxerListener::ContainerType container_type,
                        MediaInfo* media_info);
 
+/// @return True if @a media_info1 and @a media_info2 are compatible. MediaInfos
+///         are considered to be compatible if codec and container are the same.
+bool IsMediaInfoCompatible(const MediaInfo& media_info1,
+                           const MediaInfo& media_info2);
+
 /// @param[in,out] media_info points to the MediaInfo object to be filled.
 /// @return true on success, false otherwise.
 bool SetVodInformation(const MuxerListener::MediaRanges& media_ranges,
@@ -59,4 +64,4 @@ std::string CreateUUIDString(const std::vector<uint8_t>& data);
 }  // namespace internal
 }  // namespace media
 }  // namespace shaka
-#endif  // MEDIA_EVENT_MUXER_LISTENER_INTERNAL_H_
+#endif  // PACKAGER_MEDIA_EVENT_MUXER_LISTENER_INTERNAL_H_

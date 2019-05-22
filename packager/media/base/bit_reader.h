@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef MEDIA_BASE_BIT_READER_H_
-#define MEDIA_BASE_BIT_READER_H_
+#ifndef PACKAGER_MEDIA_BASE_BIT_READER_H_
+#define PACKAGER_MEDIA_BASE_BIT_READER_H_
 
 #include <stdint.h>
 #include <sys/types.h>
@@ -73,6 +73,10 @@ class BitReader {
     return condition_read == condition ? SkipBits(num_bits) : true;
   }
 
+  /// Skip a number of bits so the stream is byte aligned to the initial data.
+  /// There could be 0 to 7 bits skipped.
+  void SkipToNextByte();
+
   /// Skip a number of bytes from stream. The current posision should be byte
   /// aligned, otherwise a false is returned and bytes are not skipped.
   /// @param num_bytes specifies the number of bytes to be skipped.
@@ -121,4 +125,4 @@ class BitReader {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_BASE_BIT_READER_H_
+#endif  // PACKAGER_MEDIA_BASE_BIT_READER_H_

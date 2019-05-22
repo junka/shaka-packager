@@ -14,6 +14,7 @@
 #include "packager/media/base/muxer_options.h"
 #include "packager/media/event/progress_listener.h"
 #include "packager/media/formats/mp4/box_definitions.h"
+#include "packager/media/formats/mp4/key_frame_info.h"
 
 namespace shaka {
 namespace media {
@@ -90,8 +91,10 @@ Status SingleSegmentSegmenter::DoFinalize() {
 
   // Close the temp file to prepare for reading later.
   if (!temp_file_.release()->Close()) {
-    return Status(error::FILE_FAILURE,
-                  "Cannot close the temp file " + temp_file_name_);
+    return Status(
+        error::FILE_FAILURE,
+        "Cannot close the temp file " + temp_file_name_ +
+            ", possibly file permission issue or running out of disk space.");
   }
 
   std::unique_ptr<File, FileCloser> file(
@@ -142,6 +145,16 @@ Status SingleSegmentSegmenter::DoFinalize() {
     UpdateProgress(static_cast<double>(size) / temp_file->Size() *
                    re_segment_progress_target);
   }
+  if (!temp_file.release()->Close()) {
+    return Status(error::FILE_FAILURE, "Cannot close the temp file " +
+                                           temp_file_name_ + " after reading.");
+  }
+  if (!file.release()->Close()) {
+    return Status(
+        error::FILE_FAILURE,
+        "Cannot close file " + options().output_file_name +
+            ", possibly file permission issue or running out of disk space.");
+  }
   SetComplete();
   return Status::OK;
 }
@@ -183,28 +196,19 @@ Status SingleSegmentSegmenter::DoFinalizeSegment() {
     vod_sidx_.reset(new SegmentIndex());
     vod_sidx_->reference_id = sidx()->reference_id;
     vod_sidx_->timescale = sidx()->timescale;
-
-    if (vod_ref.earliest_presentation_time > 0) {
-      const double starting_time_in_seconds =
-          static_cast<double>(vod_ref.earliest_presentation_time) /
-          GetReferenceTimeScale();
-      // Give a warning if it is significant.
-      if (starting_time_in_seconds > 0.5) {
-        // Note that DASH IF player requires presentationTimeOffset to be set in
-        // Segment{Base,List,Template} if there is non-zero starting time. Since
-        // current Chromium's MSE implementation uses DTS, the player expects
-        // DTS to be used.
-        LOG(WARNING) << "Warning! Non-zero starting time (in seconds): "
-                     << starting_time_in_seconds
-                     << ". Manual adjustment of presentationTimeOffset in "
-                        "mpd might be necessary.";
-      }
-    }
-    // Force earliest_presentation_time to start from 0 for VOD.
-    vod_sidx_->earliest_presentation_time = 0;
+    vod_sidx_->earliest_presentation_time = vod_ref.earliest_presentation_time;
   }
   vod_sidx_->references.push_back(vod_ref);
 
+  if (muxer_listener()) {
+    for (const KeyFrameInfo& key_frame_info : key_frame_infos()) {
+      // Unlike multisegment-segmenter, there is no (sub)segment header (styp,
+      // sidx), so this is already the offset within the (sub)segment.
+      muxer_listener()->OnKeyFrame(key_frame_info.timestamp,
+                                   key_frame_info.start_byte_offset,
+                                   key_frame_info.size);
+    }
+  }
   // Append fragment buffer to temp file.
   size_t segment_size = fragment_buffer()->Size();
   Status status = fragment_buffer()->WriteToFile(temp_file_.get());

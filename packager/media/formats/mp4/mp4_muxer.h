@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_FORMATS_MP4_MP4_MUXER_H_
-#define MEDIA_FORMATS_MP4_MP4_MUXER_H_
+#ifndef PACKAGER_MEDIA_FORMATS_MP4_MP4_MUXER_H_
+#define PACKAGER_MEDIA_FORMATS_MP4_MP4_MUXER_H_
 
 #include <vector>
 
@@ -39,20 +39,22 @@ class MP4Muxer : public Muxer {
   // Muxer implementation overrides.
   Status InitializeMuxer() override;
   Status Finalize() override;
-  Status AddSample(size_t stream_id,
-                   std::shared_ptr<MediaSample> sample) override;
+  Status AddSample(size_t stream_id, const MediaSample& sample) override;
   Status FinalizeSegment(size_t stream_id,
-                         std::shared_ptr<SegmentInfo> segment_info) override;
+                         const SegmentInfo& segment_info) override;
+
+  Status DelayInitializeMuxer();
+  Status UpdateEditListOffsetFromSample(const MediaSample& sample);
 
   // Generate Audio/Video Track box.
   void InitializeTrak(const StreamInfo* info, Track* trak);
-  void GenerateAudioTrak(const AudioStreamInfo* audio_info,
+  bool GenerateAudioTrak(const AudioStreamInfo* audio_info,
                          Track* trak,
                          uint32_t track_id);
-  void GenerateVideoTrak(const VideoStreamInfo* video_info,
+  bool GenerateVideoTrak(const VideoStreamInfo* video_info,
                          Track* trak,
                          uint32_t track_id);
-  void GenerateTextTrak(const TextStreamInfo* video_info,
+  bool GenerateTextTrak(const TextStreamInfo* video_info,
                         Track* trak,
                         uint32_t track_id);
 
@@ -71,6 +73,10 @@ class MP4Muxer : public Muxer {
   // Get time in seconds since midnight, Jan. 1, 1904, in UTC Time.
   uint64_t IsoTimeNow();
 
+  // Assumes single stream (multiplexed a/v not supported yet).
+  bool to_be_initialized_ = true;
+  base::Optional<int64_t> edit_list_offset_;
+
   std::unique_ptr<Segmenter> segmenter_;
 
   DISALLOW_COPY_AND_ASSIGN(MP4Muxer);
@@ -80,4 +86,4 @@ class MP4Muxer : public Muxer {
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_FORMATS_MP4_MP4_MUXER_H_
+#endif  // PACKAGER_MEDIA_FORMATS_MP4_MP4_MUXER_H_

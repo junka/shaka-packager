@@ -16,15 +16,20 @@
 namespace shaka {
 namespace media {
 
+using ::testing::_;
+using ::testing::Bool;
+using ::testing::ElementsAre;
+using ::testing::InSequence;
+using ::testing::Property;
 using ::testing::Return;
 using ::testing::StrEq;
-using ::testing::_;
+using ::testing::TestWithParam;
 
 namespace {
 
 class MockHlsNotifier : public hls::HlsNotifier {
  public:
-  MockHlsNotifier() : HlsNotifier(HlsPlaylistType::kVod) {}
+  MockHlsNotifier() : HlsNotifier(HlsParams()) {}
 
   MOCK_METHOD0(Init, bool());
   MOCK_METHOD5(NotifyNewStream,
@@ -40,6 +45,12 @@ class MockHlsNotifier : public hls::HlsNotifier {
                     uint64_t duration,
                     uint64_t start_byte_offset,
                     uint64_t size));
+  MOCK_METHOD4(NotifyKeyFrame,
+               bool(uint32_t stream_id,
+                    uint64_t timestamp,
+                    uint64_t start_byte_offset,
+                    uint64_t size));
+  MOCK_METHOD2(NotifyCueEvent, bool(uint32_t stream_id, uint64_t timestamp));
   MOCK_METHOD5(
       NotifyEncryptionUpdate,
       bool(uint32_t stream_id,
@@ -61,13 +72,30 @@ const uint8_t kAnyData[] = {
   0xFF, 0x78, 0xAA, 0x6B,
 };
 
+const uint64_t kSegmentStartOffset = 10000;
+const uint64_t kSegmentStartTime = 19283;
+const uint64_t kSegmentDuration = 98028;
+const uint64_t kSegmentSize = 756739;
+
+const uint64_t kCueStartTime = kSegmentStartTime;
+
+const uint64_t kKeyFrameTimestamp = 20123;
+const uint64_t kKeyFrameStartByteOffset = 3456;
+const uint64_t kKeyFrameSize = 543234;
+
+static_assert(kKeyFrameStartByteOffset < kSegmentSize, "");
+static_assert(kKeyFrameStartByteOffset + kKeyFrameSize <= kSegmentSize, "");
+
 // This value doesn't really affect the test, it's not used by the
 // implementation.
 const bool kInitialEncryptionInfo = true;
+const bool kIFramesOnlyPlaylist = true;
 
 const char kDefaultPlaylistName[] = "default_playlist.m3u8";
 const char kDefaultName[] = "DEFAULTNAME";
 const char kDefaultGroupId[] = "DEFAULTGROUPID";
+const char kCharactersticA[] = "public.accessibility.transcribes-spoken-dialog";
+const char kCharactersticB[] = "public.easy-to-read";
 
 MATCHER_P(HasEncryptionScheme, expected_scheme, "") {
   *result_listener << "it has_protected_content: "
@@ -86,9 +114,28 @@ class HlsNotifyMuxerListenerTest : public ::testing::Test {
  protected:
   HlsNotifyMuxerListenerTest()
       : listener_(kDefaultPlaylistName,
+                  !kIFramesOnlyPlaylist,
                   kDefaultName,
                   kDefaultGroupId,
+                  std::vector<std::string>{kCharactersticA, kCharactersticB},
                   &mock_notifier_) {}
+
+  MuxerListener::MediaRanges GetMediaRanges(
+      const std::vector<Range>& segment_ranges) {
+    MuxerListener::MediaRanges ranges;
+    // We don't care about init range and index range values.
+    Range init_range;
+    init_range.start = 0;
+    init_range.end = 100;
+    Range index_range;
+    index_range.start = 101;
+    index_range.end = 200;
+
+    ranges.init_range = init_range;
+    ranges.index_range = index_range;
+    ranges.subsegment_ranges = segment_ranges;
+    return ranges;
+  }
 
   MockHlsNotifier mock_notifier_;
   HlsNotifyMuxerListener listener_;
@@ -97,22 +144,12 @@ class HlsNotifyMuxerListenerTest : public ::testing::Test {
 // Verify that NotifyEncryptionUpdate() is not called before OnMediaStart() is
 // called.
 TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionInfoReadyBeforeMediaStart) {
-  ProtectionSystemSpecificInfo info;
-  std::vector<uint8_t> system_id(kAnySystemId,
-                                 kAnySystemId + arraysize(kAnySystemId));
-  info.set_system_id(system_id.data(), system_id.size());
-  std::vector<uint8_t> pssh_data(kAnyData, kAnyData + arraysize(kAnyData));
-  info.set_pssh_data(pssh_data);
-
   std::vector<uint8_t> key_id(16, 0x05);
-  std::vector<ProtectionSystemSpecificInfo> key_system_infos;
-  key_system_infos.push_back(info);
-
   std::vector<uint8_t> iv(16, 0x54);
 
   EXPECT_CALL(mock_notifier_, NotifyEncryptionUpdate(_, _, _, _, _)).Times(0);
   listener_.OnEncryptionInfoReady(kInitialEncryptionInfo, FOURCC_cbcs, key_id,
-                                  iv, key_system_infos);
+                                  iv, GetDefaultKeySystemInfo());
 }
 
 TEST_F(HlsNotifyMuxerListenerTest, OnMediaStart) {
@@ -120,9 +157,12 @@ TEST_F(HlsNotifyMuxerListenerTest, OnMediaStart) {
   std::shared_ptr<StreamInfo> video_stream_info =
       CreateVideoStreamInfo(video_params);
 
-  EXPECT_CALL(mock_notifier_,
-              NotifyNewStream(_, StrEq(kDefaultPlaylistName),
-                              StrEq("DEFAULTNAME"), StrEq("DEFAULTGROUPID"), _))
+  EXPECT_CALL(
+      mock_notifier_,
+      NotifyNewStream(Property(&MediaInfo::hls_characteristics,
+                               ElementsAre(kCharactersticA, kCharactersticB)),
+                      StrEq(kDefaultPlaylistName), StrEq("DEFAULTNAME"),
+                      StrEq("DEFAULTGROUPID"), _))
       .WillOnce(Return(true));
 
   MuxerOptions muxer_options;
@@ -134,22 +174,15 @@ TEST_F(HlsNotifyMuxerListenerTest, OnMediaStart) {
 // OnEncryptionStart() should call MuxerListener::NotifyEncryptionUpdate() after
 // OnEncryptionInfoReady() and OnMediaStart().
 TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionStart) {
-  ProtectionSystemSpecificInfo info;
   std::vector<uint8_t> system_id(kAnySystemId,
                                  kAnySystemId + arraysize(kAnySystemId));
-  info.set_system_id(system_id.data(), system_id.size());
-  std::vector<uint8_t> pssh_data(kAnyData, kAnyData + arraysize(kAnyData));
-  info.set_pssh_data(pssh_data);
-
+  std::vector<uint8_t> pssh(kAnyData, kAnyData + arraysize(kAnyData));
   std::vector<uint8_t> key_id(16, 0x05);
-  std::vector<ProtectionSystemSpecificInfo> key_system_infos;
-  key_system_infos.push_back(info);
-
   std::vector<uint8_t> iv(16, 0x54);
 
   EXPECT_CALL(mock_notifier_, NotifyEncryptionUpdate(_, _, _, _, _)).Times(0);
   listener_.OnEncryptionInfoReady(kInitialEncryptionInfo, FOURCC_cbcs, key_id,
-                                  iv, key_system_infos);
+                                  iv, {{system_id, pssh}});
   ::testing::Mock::VerifyAndClearExpectations(&mock_notifier_);
 
   ON_CALL(mock_notifier_, NotifyNewStream(_, _, _, _, _))
@@ -165,8 +198,8 @@ TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionStart) {
                          MuxerListener::kContainerMpeg2ts);
   ::testing::Mock::VerifyAndClearExpectations(&mock_notifier_);
 
-  EXPECT_CALL(mock_notifier_, NotifyEncryptionUpdate(_, key_id, system_id, iv,
-                                                     info.CreateBox()))
+  EXPECT_CALL(mock_notifier_,
+              NotifyEncryptionUpdate(_, key_id, system_id, iv, pssh))
       .WillOnce(Return(true));
   listener_.OnEncryptionStart();
 }
@@ -175,22 +208,15 @@ TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionStart) {
 // HlsNotiifer::NotifyEncryptionUpdate() should be called by the end of
 // OnMediaStart().
 TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionStartBeforeMediaStart) {
-  ProtectionSystemSpecificInfo info;
   std::vector<uint8_t> system_id(kAnySystemId,
                                  kAnySystemId + arraysize(kAnySystemId));
-  info.set_system_id(system_id.data(), system_id.size());
-  std::vector<uint8_t> pssh_data(kAnyData, kAnyData + arraysize(kAnyData));
-  info.set_pssh_data(pssh_data);
-
+  std::vector<uint8_t> pssh(kAnyData, kAnyData + arraysize(kAnyData));
   std::vector<uint8_t> key_id(16, 0x05);
-  std::vector<ProtectionSystemSpecificInfo> key_system_infos;
-  key_system_infos.push_back(info);
-
   std::vector<uint8_t> iv(16, 0x54);
 
   EXPECT_CALL(mock_notifier_, NotifyEncryptionUpdate(_, _, _, _, _)).Times(0);
   listener_.OnEncryptionInfoReady(kInitialEncryptionInfo, FOURCC_cbcs, key_id,
-                                  iv, key_system_infos);
+                                  iv, {{system_id, pssh}});
   ::testing::Mock::VerifyAndClearExpectations(&mock_notifier_);
 
   ON_CALL(mock_notifier_, NotifyNewStream(_, _, _, _, _))
@@ -204,8 +230,8 @@ TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionStartBeforeMediaStart) {
   // It doesn't really matter when this is called, could be called right away in
   // OnEncryptionStart() if that is possible. Just matters that it is called by
   // the time OnMediaStart() returns.
-  EXPECT_CALL(mock_notifier_, NotifyEncryptionUpdate(_, key_id, system_id, iv,
-                                                     info.CreateBox()))
+  EXPECT_CALL(mock_notifier_,
+              NotifyEncryptionUpdate(_, key_id, system_id, iv, pssh))
       .WillOnce(Return(true));
   listener_.OnEncryptionStart();
   listener_.OnMediaStart(muxer_options, *video_stream_info, 90000,
@@ -215,22 +241,12 @@ TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionStartBeforeMediaStart) {
 // NotifyEncryptionUpdate() should not be called if NotifyNewStream() fails in
 // OnMediaStart().
 TEST_F(HlsNotifyMuxerListenerTest, NoEncryptionUpdateIfNotifyNewStreamFails) {
-  ProtectionSystemSpecificInfo info;
-  std::vector<uint8_t> system_id(kAnySystemId,
-                                 kAnySystemId + arraysize(kAnySystemId));
-  info.set_system_id(system_id.data(), system_id.size());
-  std::vector<uint8_t> pssh_data(kAnyData, kAnyData + arraysize(kAnyData));
-  info.set_pssh_data(pssh_data);
-
   std::vector<uint8_t> key_id(16, 0x05);
-  std::vector<ProtectionSystemSpecificInfo> key_system_infos;
-  key_system_infos.push_back(info);
-
   std::vector<uint8_t> iv(16, 0x54);
 
   EXPECT_CALL(mock_notifier_, NotifyEncryptionUpdate(_, _, _, _, _)).Times(0);
   listener_.OnEncryptionInfoReady(kInitialEncryptionInfo, FOURCC_cbcs, key_id,
-                                  iv, key_system_infos);
+                                  iv, GetDefaultKeySystemInfo());
   ::testing::Mock::VerifyAndClearExpectations(&mock_notifier_);
 
   EXPECT_CALL(mock_notifier_, NotifyNewStream(_, _, _, _, _))
@@ -259,44 +275,27 @@ TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionInfoReady) {
   listener_.OnMediaStart(muxer_options, *video_stream_info, 90000,
                          MuxerListener::kContainerMpeg2ts);
 
-  ProtectionSystemSpecificInfo info;
   std::vector<uint8_t> system_id(kAnySystemId,
                                  kAnySystemId + arraysize(kAnySystemId));
-  info.set_system_id(system_id.data(), system_id.size());
-  std::vector<uint8_t> pssh_data(kAnyData, kAnyData + arraysize(kAnyData));
-  info.set_pssh_data(pssh_data);
-
+  std::vector<uint8_t> pssh(kAnyData, kAnyData + arraysize(kAnyData));
   std::vector<uint8_t> key_id(16, 0x05);
-  std::vector<ProtectionSystemSpecificInfo> key_system_infos;
-  key_system_infos.push_back(info);
-
   std::vector<uint8_t> iv(16, 0x54);
 
-  EXPECT_CALL(mock_notifier_, NotifyEncryptionUpdate(_, key_id, system_id, iv,
-                                                     info.CreateBox()))
+  EXPECT_CALL(mock_notifier_,
+              NotifyEncryptionUpdate(_, key_id, system_id, iv, pssh))
       .WillOnce(Return(true));
   listener_.OnEncryptionInfoReady(kInitialEncryptionInfo, FOURCC_cbcs, key_id,
-                                  iv, key_system_infos);
+                                  iv, {{system_id, pssh}});
 }
 
 // Verify that if protection scheme is specified in OnEncryptionInfoReady(),
 // the information is copied to MediaInfo in OnMediaStart().
 TEST_F(HlsNotifyMuxerListenerTest, OnEncryptionInfoReadyWithProtectionScheme) {
-  ProtectionSystemSpecificInfo info;
-  std::vector<uint8_t> system_id(kAnySystemId,
-                                 kAnySystemId + arraysize(kAnySystemId));
-  info.set_system_id(system_id.data(), system_id.size());
-  std::vector<uint8_t> pssh_data(kAnyData, kAnyData + arraysize(kAnyData));
-  info.set_pssh_data(pssh_data);
-
   std::vector<uint8_t> key_id(16, 0x05);
-  std::vector<ProtectionSystemSpecificInfo> key_system_infos;
-  key_system_infos.push_back(info);
-
   std::vector<uint8_t> iv(16, 0x54);
 
   listener_.OnEncryptionInfoReady(kInitialEncryptionInfo, FOURCC_cenc, key_id,
-                                  iv, key_system_infos);
+                                  iv, GetDefaultKeySystemInfo());
   ::testing::Mock::VerifyAndClearExpectations(&mock_notifier_);
 
   ON_CALL(mock_notifier_,
@@ -316,13 +315,7 @@ TEST_F(HlsNotifyMuxerListenerTest, OnSampleDurationReady) {
   listener_.OnSampleDurationReady(2340);
 }
 
-// Make sure it doesn't crash.
-TEST_F(HlsNotifyMuxerListenerTest, OnMediaEnd) {
-  // None of these values matter, they are not used.
-  listener_.OnMediaEnd(MuxerListener::MediaRanges(), 0);
-}
-
-TEST_F(HlsNotifyMuxerListenerTest, OnNewSegment) {
+TEST_F(HlsNotifyMuxerListenerTest, OnNewSegmentAndCueEvent) {
   ON_CALL(mock_notifier_, NotifyNewStream(_, _, _, _, _))
       .WillByDefault(Return(true));
   VideoStreamInfoParameters video_params = GetDefaultVideoStreamInfoParams();
@@ -333,14 +326,14 @@ TEST_F(HlsNotifyMuxerListenerTest, OnNewSegment) {
   listener_.OnMediaStart(muxer_options, *video_stream_info, 90000,
                          MuxerListener::kContainerMpeg2ts);
 
-  const uint64_t kStartTime = 19283;
-  const uint64_t kDuration = 98028;
-  const uint64_t kFileSize = 756739;
-  EXPECT_CALL(mock_notifier_,
-              NotifyNewSegment(_, StrEq("new_segment_name10.ts"), kStartTime,
-                               kDuration, _, kFileSize));
-  listener_.OnNewSegment("new_segment_name10.ts", kStartTime, kDuration,
-                         kFileSize);
+  EXPECT_CALL(mock_notifier_, NotifyCueEvent(_, kCueStartTime));
+  EXPECT_CALL(
+      mock_notifier_,
+      NotifyNewSegment(_, StrEq("new_segment_name10.ts"), kSegmentStartTime,
+                       kSegmentDuration, _, kSegmentSize));
+  listener_.OnCueEvent(kCueStartTime, "dummy cue data");
+  listener_.OnNewSegment("new_segment_name10.ts", kSegmentStartTime,
+                         kSegmentDuration, kSegmentSize);
 }
 
 // Verify that the notifier is called for every segment in OnMediaEnd if
@@ -356,34 +349,63 @@ TEST_F(HlsNotifyMuxerListenerTest, NoSegmentTemplateOnMediaEnd) {
   listener_.OnMediaStart(muxer_options, *video_stream_info, 90000,
                          MuxerListener::kContainerMpeg2ts);
 
-  const uint64_t kSegmentStartOffset = 10000;
-  const uint64_t kStartTime = 19283;
-  const uint64_t kDuration = 98028;
-  const uint64_t kFileSize = 756739;
+  listener_.OnCueEvent(kCueStartTime, "dummy cue data");
+  listener_.OnNewSegment("filename.mp4", kSegmentStartTime, kSegmentDuration,
+                         kSegmentSize);
 
-  listener_.OnNewSegment("filename.mp4", kStartTime, kDuration,
-                         kFileSize);
-  MuxerListener::MediaRanges ranges;
-  Range init_range;
-  init_range.start = 0;
-  init_range.end = 100;
-  Range index_range;
-  index_range.start = 101;
-  index_range.end = 200;
-  // Only one segment range for this test.
-  std::vector<Range> segment_ranges;
-  Range segment_range;
-  segment_range.start = kSegmentStartOffset;
-  segment_range.end = kSegmentStartOffset + kFileSize - 1;
-  segment_ranges.push_back(segment_range);
-  ranges.init_range = init_range;
-  ranges.index_range = index_range;
-  ranges.subsegment_ranges = segment_ranges;
+  EXPECT_CALL(mock_notifier_, NotifyCueEvent(_, kCueStartTime));
+  EXPECT_CALL(
+      mock_notifier_,
+      NotifyNewSegment(_, StrEq("filename.mp4"), kSegmentStartTime,
+                       kSegmentDuration, kSegmentStartOffset, kSegmentSize));
+  listener_.OnMediaEnd(
+      GetMediaRanges(
+          {{kSegmentStartOffset, kSegmentStartOffset + kSegmentSize - 1}}),
+      200000);
+}
 
+// Verify the event handling with multiple files, i.e. multiple OnMediaStart and
+// OnMediaEnd calls.
+TEST_F(HlsNotifyMuxerListenerTest, NoSegmentTemplateOnMediaEndTwice) {
+  VideoStreamInfoParameters video_params = GetDefaultVideoStreamInfoParams();
+  std::shared_ptr<StreamInfo> video_stream_info =
+      CreateVideoStreamInfo(video_params);
+  MuxerOptions muxer_options1;
+  muxer_options1.output_file_name = "filename1.mp4";
+  MuxerOptions muxer_options2 = muxer_options1;
+  muxer_options2.output_file_name = "filename2.mp4";
+
+  InSequence in_sequence;
+
+  // Event flow for first file.
+  listener_.OnMediaStart(muxer_options1, *video_stream_info, 90000,
+                         MuxerListener::kContainerMpeg2ts);
+  listener_.OnNewSegment("filename1.mp4", kSegmentStartTime, kSegmentDuration,
+                         kSegmentSize);
+  listener_.OnCueEvent(kCueStartTime, "dummy cue data");
+
+  EXPECT_CALL(mock_notifier_, NotifyNewStream(_, _, _, _, _))
+      .WillOnce(Return(true));
+  EXPECT_CALL(mock_notifier_, NotifyNewSegment(_, StrEq("filename1.mp4"),
+                                               kSegmentStartTime, _, _, _));
+  EXPECT_CALL(mock_notifier_, NotifyCueEvent(_, kCueStartTime));
+  listener_.OnMediaEnd(
+      GetMediaRanges(
+          {{kSegmentStartOffset, kSegmentStartOffset + kSegmentSize - 1}}),
+      200000);
+
+  // Event flow for second file.
+  listener_.OnMediaStart(muxer_options2, *video_stream_info, 90000,
+                         MuxerListener::kContainerMpeg2ts);
+  listener_.OnNewSegment("filename2.mp4", kSegmentStartTime + kSegmentDuration,
+                         kSegmentDuration, kSegmentSize);
   EXPECT_CALL(mock_notifier_,
-              NotifyNewSegment(_, StrEq("filename.mp4"), kStartTime,
-                               kDuration, kSegmentStartOffset, kFileSize));
-  listener_.OnMediaEnd(ranges, 200000);
+              NotifyNewSegment(_, StrEq("filename2.mp4"),
+                               kSegmentStartTime + kSegmentDuration, _, _, _));
+  listener_.OnMediaEnd(
+      GetMediaRanges(
+          {{kSegmentStartOffset, kSegmentStartOffset + kSegmentSize - 1}}),
+      200000);
 }
 
 // Verify that when there is a mismatch in the number of calls to
@@ -401,42 +423,90 @@ TEST_F(HlsNotifyMuxerListenerTest,
   listener_.OnMediaStart(muxer_options, *video_stream_info, 90000,
                          MuxerListener::kContainerMpeg2ts);
 
-  const uint64_t kSegmentStartOffset = 10000;
-  const uint64_t kStartTime = 19283;
-  const uint64_t kDuration = 98028;
-  const uint64_t kFileSize = 756739;
+  listener_.OnNewSegment("filename.mp4", kSegmentStartTime, kSegmentDuration,
+                         kSegmentSize);
+  EXPECT_CALL(
+      mock_notifier_,
+      NotifyNewSegment(_, StrEq("filename.mp4"), kSegmentStartTime,
+                       kSegmentDuration, kSegmentStartOffset, kSegmentSize));
+  listener_.OnMediaEnd(
+      GetMediaRanges(
+          {{kSegmentStartOffset, kSegmentStartOffset + kSegmentSize - 1},
+           {kSegmentStartOffset + kSegmentSize,
+            kSegmentStartOffset + kSegmentSize * 2 - 1}}),
+      200000);
+}
 
-  listener_.OnNewSegment("filename.mp4", kStartTime, kDuration,
-                         kFileSize);
-  MuxerListener::MediaRanges ranges;
-  Range init_range;
-  init_range.start = 0;
-  init_range.end = 100;
-  Range index_range;
-  index_range.start = 101;
-  index_range.end = 200;
-  // Only one segment range for this test.
-  std::vector<Range> segment_ranges;
+class HlsNotifyMuxerListenerKeyFrameTest : public TestWithParam<bool> {
+ public:
+  HlsNotifyMuxerListenerKeyFrameTest()
+      : listener_(kDefaultPlaylistName,
+                  GetParam(),
+                  kDefaultName,
+                  kDefaultGroupId,
+                  std::vector<std::string>(),  // no characteristics.
+                  &mock_notifier_) {}
 
-  Range segment_range1;
-  segment_range1.start = kSegmentStartOffset;
-  segment_range1.end = kSegmentStartOffset + kFileSize - 1;
-  segment_ranges.push_back(segment_range1);
+  MockHlsNotifier mock_notifier_;
+  HlsNotifyMuxerListener listener_;
+};
 
-  Range segment_range2;
-  segment_range2.start = segment_range1.end + 1;
-  segment_range2.end = segment_range2.start + 109823;
-  segment_ranges.push_back(segment_range2);
-
-  ranges.init_range = init_range;
-  ranges.index_range = index_range;
-  ranges.subsegment_ranges = segment_ranges;
+TEST_P(HlsNotifyMuxerListenerKeyFrameTest, WithSegmentTemplate) {
+  ON_CALL(mock_notifier_, NotifyNewStream(_, _, _, _, _))
+      .WillByDefault(Return(true));
+  VideoStreamInfoParameters video_params = GetDefaultVideoStreamInfoParams();
+  std::shared_ptr<StreamInfo> video_stream_info =
+      CreateVideoStreamInfo(video_params);
+  MuxerOptions muxer_options;
+  muxer_options.segment_template = "$Number$.mp4";
+  listener_.OnMediaStart(muxer_options, *video_stream_info, 90000,
+                         MuxerListener::kContainerMpeg2ts);
 
   EXPECT_CALL(mock_notifier_,
-              NotifyNewSegment(_, StrEq("filename.mp4"), kStartTime,
-                               kDuration, kSegmentStartOffset, kFileSize));
+              NotifyKeyFrame(_, kKeyFrameTimestamp, kKeyFrameStartByteOffset,
+                             kKeyFrameSize))
+      .Times(GetParam() ? 1 : 0);
+  listener_.OnKeyFrame(kKeyFrameTimestamp, kKeyFrameStartByteOffset,
+                       kKeyFrameSize);
+}
+
+// Verify that the notifier is called for every key frame in OnMediaEnd if
+// segment_template is not set.
+TEST_P(HlsNotifyMuxerListenerKeyFrameTest, NoSegmentTemplate) {
+  ON_CALL(mock_notifier_, NotifyNewStream(_, _, _, _, _))
+      .WillByDefault(Return(true));
+  VideoStreamInfoParameters video_params = GetDefaultVideoStreamInfoParams();
+  std::shared_ptr<StreamInfo> video_stream_info =
+      CreateVideoStreamInfo(video_params);
+  MuxerOptions muxer_options;
+  muxer_options.output_file_name = "filename.mp4";
+  listener_.OnMediaStart(muxer_options, *video_stream_info, 90000,
+                         MuxerListener::kContainerMpeg2ts);
+
+  listener_.OnKeyFrame(kKeyFrameTimestamp, kKeyFrameStartByteOffset,
+                       kKeyFrameSize);
+  listener_.OnNewSegment("filename.mp4", kSegmentStartTime, kSegmentDuration,
+                         kSegmentSize);
+
+  EXPECT_CALL(mock_notifier_,
+              NotifyKeyFrame(_, kKeyFrameTimestamp,
+                             kSegmentStartOffset + kKeyFrameStartByteOffset,
+                             kKeyFrameSize))
+      .Times(GetParam() ? 1 : 0);
+  EXPECT_CALL(
+      mock_notifier_,
+      NotifyNewSegment(_, StrEq("filename.mp4"), kSegmentStartTime,
+                       kSegmentDuration, kSegmentStartOffset, kSegmentSize));
+
+  MuxerListener::MediaRanges ranges;
+  ranges.subsegment_ranges.push_back(
+      {kSegmentStartOffset, kSegmentStartOffset + kSegmentSize - 1});
   listener_.OnMediaEnd(ranges, 200000);
 }
+
+INSTANTIATE_TEST_CASE_P(InstantiationName,
+                        HlsNotifyMuxerListenerKeyFrameTest,
+                        Bool());
 
 }  // namespace media
 }  // namespace shaka

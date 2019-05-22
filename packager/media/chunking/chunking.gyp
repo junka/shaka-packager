@@ -5,9 +5,9 @@
 # https://developers.google.com/open-source/licenses/bsd
 
 {
-  'includes': [
-    '../../common.gypi',
-  ],
+  'variables': {
+    'shaka_code': 1,
+  },
   'targets': [
     {
       'target_name': 'chunking',
@@ -15,6 +15,12 @@
       'sources': [
         'chunking_handler.cc',
         'chunking_handler.h',
+        'cue_alignment_handler.cc',
+        'cue_alignment_handler.h',
+        'sync_point_queue.cc',
+        'sync_point_queue.h',
+        'text_chunker.cc',
+        'text_chunker.h',
       ],
       'dependencies': [
         '../base/media_base.gyp:media_base',
@@ -25,6 +31,8 @@
       'type': '<(gtest_target_type)',
       'sources': [
         'chunking_handler_unittest.cc',
+        'cue_alignment_handler_unittest.cc',
+        'text_chunker_unittest.cc',
       ],
       'dependencies': [
         '../../testing/gtest.gyp:gtest',

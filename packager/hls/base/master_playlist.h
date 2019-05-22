@@ -8,10 +8,7 @@
 #define PACKAGER_HLS_BASE_MASTER_PLAYLIST_H_
 
 #include <list>
-#include <map>
 #include <string>
-
-#include "packager/base/macros.h"
 
 namespace shaka {
 namespace hls {
@@ -23,13 +20,14 @@ class MediaPlaylist;
 class MasterPlaylist {
  public:
   /// @param file_name is the file name of the master playlist.
-  explicit MasterPlaylist(const std::string& file_name);
+  /// @param default_audio_language determines the audio rendition that should
+  ///        be tagged with 'DEFAULT'.
+  /// @param default_text_language determines the text rendition that should be
+  ///        tagged with 'DEFAULT'.
+  MasterPlaylist(const std::string& file_name,
+                 const std::string& default_audio_language,
+                 const std::string& default_text_language);
   virtual ~MasterPlaylist();
-
-  /// @param media_playlist is a MediaPlaylist that should get added to this
-  ///        master playlist. Ownership does not transfer.
-  /// @return true on success, false otherwise.
-  virtual void AddMediaPlaylist(MediaPlaylist* media_playlist);
 
   /// Writes Master Playlist to output_dir + <name of playlist>.
   /// This assumes that @a base_url is used as the prefix for Media Playlists.
@@ -41,17 +39,17 @@ class MasterPlaylist {
   /// @return true if the playlist is updated successfully or there is no
   ///         difference since the last write, false otherwise.
   virtual bool WriteMasterPlaylist(const std::string& base_url,
-                                   const std::string& output_dir);
+                                   const std::string& output_dir,
+                                   const std::list<MediaPlaylist*>& playlists);
 
  private:
+  MasterPlaylist(const MasterPlaylist&) = delete;
+  MasterPlaylist& operator=(const MasterPlaylist&) = delete;
+
   std::string written_playlist_;
   const std::string file_name_;
-  std::list<MediaPlaylist*> all_playlists_;
-  std::list<const MediaPlaylist*> video_playlists_;
-  // The key is the audio group name.
-  std::map<std::string, std::list<const MediaPlaylist*>> audio_playlist_groups_;
-
-  DISALLOW_COPY_AND_ASSIGN(MasterPlaylist);
+  const std::string default_audio_language_;
+  const std::string default_text_language_;
 };
 
 }  // namespace hls

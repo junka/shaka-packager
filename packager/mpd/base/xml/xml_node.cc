@@ -6,6 +6,8 @@
 
 #include "packager/mpd/base/xml/xml_node.h"
 
+#include <gflags/gflags.h>
+
 #include <limits>
 #include <set>
 
@@ -16,6 +18,11 @@
 #include "packager/mpd/base/media_info.pb.h"
 #include "packager/mpd/base/mpd_utils.h"
 #include "packager/mpd/base/segment_info.h"
+
+DEFINE_bool(segment_template_constant_duration,
+            false,
+            "Generates SegmentTemplate@duration if all segments except the "
+            "last one has the same duration if this flag is set to true.");
 
 namespace shaka {
 
@@ -31,21 +38,73 @@ std::string RangeToString(const Range& range) {
          base::Uint64ToString(range.end());
 }
 
+// Check if segments are continuous and all segments except the last one are of
+// the same duration.
+bool IsTimelineConstantDuration(const std::list<SegmentInfo>& segment_infos,
+                                uint32_t start_number) {
+  if (!FLAGS_segment_template_constant_duration)
+    return false;
+
+  DCHECK(!segment_infos.empty());
+  if (segment_infos.size() > 2)
+    return false;
+
+  const SegmentInfo& first_segment = segment_infos.front();
+  if (first_segment.start_time != first_segment.duration * (start_number - 1))
+    return false;
+
+  if (segment_infos.size() == 1)
+    return true;
+
+  const SegmentInfo& last_segment = segment_infos.back();
+  if (last_segment.repeat != 0)
+    return false;
+
+  const int64_t expected_last_segment_start_time =
+      first_segment.start_time +
+      first_segment.duration * (first_segment.repeat + 1);
+  return expected_last_segment_start_time == last_segment.start_time;
+}
+
 bool PopulateSegmentTimeline(const std::list<SegmentInfo>& segment_infos,
                              XmlNode* segment_timeline) {
-  for (std::list<SegmentInfo>::const_iterator it = segment_infos.begin();
-       it != segment_infos.end();
-       ++it) {
+  for (const SegmentInfo& segment_info : segment_infos) {
     XmlNode s_element("S");
-    s_element.SetIntegerAttribute("t", it->start_time);
-    s_element.SetIntegerAttribute("d", it->duration);
-    if (it->repeat > 0)
-      s_element.SetIntegerAttribute("r", it->repeat);
+    s_element.SetIntegerAttribute("t", segment_info.start_time);
+    s_element.SetIntegerAttribute("d", segment_info.duration);
+    if (segment_info.repeat > 0)
+      s_element.SetIntegerAttribute("r", segment_info.repeat);
 
     CHECK(segment_timeline->AddChild(s_element.PassScopedPtr()));
   }
 
   return true;
+}
+
+void CollectNamespaceFromName(const std::string& name,
+                              std::set<std::string>* namespaces) {
+  const size_t pos = name.find(':');
+  if (pos != std::string::npos)
+    namespaces->insert(name.substr(0, pos));
+}
+
+void TraverseAttrsAndCollectNamespaces(const xmlAttr* attr,
+                                       std::set<std::string>* namespaces) {
+  for (const xmlAttr* cur_attr = attr; cur_attr; cur_attr = cur_attr->next) {
+    CollectNamespaceFromName(reinterpret_cast<const char*>(cur_attr->name),
+                             namespaces);
+  }
+}
+
+void TraverseNodesAndCollectNamespaces(const xmlNode* node,
+                                       std::set<std::string>* namespaces) {
+  for (const xmlNode* cur_node = node; cur_node; cur_node = cur_node->next) {
+    CollectNamespaceFromName(reinterpret_cast<const char*>(cur_node->name),
+                             namespaces);
+
+    TraverseNodesAndCollectNamespaces(cur_node->children, namespaces);
+    TraverseAttrsAndCollectNamespaces(cur_node->properties, namespaces);
+  }
 }
 
 }  // namespace
@@ -82,11 +141,14 @@ bool XmlNode::AddElements(const std::vector<Element>& elements) {
       child_node.SetStringAttribute(attribute_it->first.c_str(),
                                     attribute_it->second);
     }
+
+    // Note that somehow |SetContent| needs to be called before |AddElements|
+    // otherwise the added children will be overwritten by the content.
+    child_node.SetContent(child_element.content);
+
     // Recursively set children for the child.
     if (!child_node.AddElements(child_element.subelements))
       return false;
-
-    child_node.SetContent(child_element.content);
 
     if (!xmlAddChild(node_.get(), child_node.GetRawPtr())) {
       LOG(ERROR) << "Failed to set child " << child_element.name
@@ -121,7 +183,7 @@ void XmlNode::SetFloatingPointAttribute(const char* attribute_name,
   DCHECK(node_);
   DCHECK(attribute_name);
   xmlSetProp(node_.get(), BAD_CAST attribute_name,
-             BAD_CAST(DoubleToString(number).c_str()));
+             BAD_CAST(base::DoubleToString(number).c_str()));
 }
 
 void XmlNode::SetId(uint32_t id) {
@@ -131,6 +193,12 @@ void XmlNode::SetId(uint32_t id) {
 void XmlNode::SetContent(const std::string& content) {
   DCHECK(node_);
   xmlNodeSetContent(node_.get(), BAD_CAST content.c_str());
+}
+
+std::set<std::string> XmlNode::ExtractReferencedNamespaces() {
+  std::set<std::string> namespaces;
+  TraverseNodesAndCollectNamespaces(node_.get(), &namespaces);
+  return namespaces;
 }
 
 scoped_xml_ptr<xmlNode> XmlNode::PassScopedPtr() {
@@ -276,9 +344,9 @@ bool RepresentationXmlNode::AddAudioInfo(const AudioInfo& audio_info) {
 }
 
 bool RepresentationXmlNode::AddVODOnlyInfo(const MediaInfo& media_info) {
-  if (media_info.has_media_file_name()) {
+  if (media_info.has_media_file_url()) {
     XmlNode base_url("BaseURL");
-    base_url.SetContent(media_info.media_file_name());
+    base_url.SetContent(media_info.media_file_url());
 
     if (!AddChild(base_url.PassScopedPtr()))
       return false;
@@ -298,6 +366,11 @@ bool RepresentationXmlNode::AddVODOnlyInfo(const MediaInfo& media_info) {
     if (media_info.has_reference_time_scale()) {
       segment_base.SetIntegerAttribute("timescale",
                                        media_info.reference_time_scale());
+    }
+
+    if (media_info.has_presentation_time_offset()) {
+      segment_base.SetIntegerAttribute("presentationTimeOffset",
+                                       media_info.presentation_time_offset());
     }
 
     if (media_info.has_init_range()) {
@@ -326,39 +399,37 @@ bool RepresentationXmlNode::AddLiveOnlyInfo(
                                          media_info.reference_time_scale());
   }
 
-  if (media_info.has_init_segment_name()) {
-    // The spec does not allow '$Number$' and '$Time$' in initialization
-    // attribute.
-    // TODO(rkuroiwa, kqyang): Swap this check out with a better check. These
-    // templates allow formatting as well.
-    const std::string& init_segment_name = media_info.init_segment_name();
-    if (init_segment_name.find("$Number$") != std::string::npos ||
-        init_segment_name.find("$Time$") != std::string::npos) {
-      LOG(ERROR) << "$Number$ and $Time$ cannot be used for "
-                    "SegmentTemplate@initialization";
-      return false;
-    }
+  if (media_info.has_presentation_time_offset()) {
+    segment_template.SetIntegerAttribute("presentationTimeOffset",
+                                         media_info.presentation_time_offset());
+  }
+
+  if (media_info.has_init_segment_url()) {
     segment_template.SetStringAttribute("initialization",
-                                        media_info.init_segment_name());
+                                        media_info.init_segment_url());
   }
 
-  if (media_info.has_segment_template()) {
-    segment_template.SetStringAttribute("media", media_info.segment_template());
+  if (media_info.has_segment_template_url()) {
+    segment_template.SetStringAttribute("media",
+                                        media_info.segment_template_url());
+    segment_template.SetIntegerAttribute("startNumber", start_number);
+  }
 
-    // TODO(rkuroiwa): Need a better check. $$Number is legitimate but not a
-    // template.
-    if (media_info.segment_template().find("$Number") != std::string::npos) {
-      DCHECK_GE(start_number, 1u);
-      segment_template.SetIntegerAttribute("startNumber", start_number);
+  if (!segment_infos.empty()) {
+    // Don't use SegmentTimeline if all segments except the last one are of
+    // the same duration.
+    if (IsTimelineConstantDuration(segment_infos, start_number)) {
+      segment_template.SetIntegerAttribute("duration",
+                                           segment_infos.front().duration);
+    } else {
+      XmlNode segment_timeline("SegmentTimeline");
+      if (!PopulateSegmentTimeline(segment_infos, &segment_timeline) ||
+          !segment_template.AddChild(segment_timeline.PassScopedPtr())) {
+        return false;
+      }
     }
   }
-
-  // TODO(rkuroiwa): Find out when a live MPD doesn't require SegmentTimeline.
-  XmlNode segment_timeline("SegmentTimeline");
-
-  return PopulateSegmentTimeline(segment_infos, &segment_timeline) &&
-         segment_template.AddChild(segment_timeline.PassScopedPtr()) &&
-         AddChild(segment_template.PassScopedPtr());
+  return AddChild(segment_template.PassScopedPtr());
 }
 
 bool RepresentationXmlNode::AddAudioChannelInfo(const AudioInfo& audio_info) {

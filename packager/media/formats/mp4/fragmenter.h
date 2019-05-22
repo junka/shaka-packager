@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef MEDIA_FORMATS_MP4_FRAGMENTER_H_
-#define MEDIA_FORMATS_MP4_FRAGMENTER_H_
+#ifndef PACKAGER_MEDIA_FORMATS_MP4_FRAGMENTER_H_
+#define PACKAGER_MEDIA_FORMATS_MP4_FRAGMENTER_H_
 
 #include <memory>
 #include <vector>
@@ -22,6 +22,7 @@ class StreamInfo;
 
 namespace mp4 {
 
+struct KeyFrameInfo;
 struct SegmentReference;
 struct TrackFragment;
 
@@ -31,14 +32,18 @@ class Fragmenter {
  public:
   /// @param info contains stream information.
   /// @param traf points to a TrackFragment box.
-  Fragmenter(std::shared_ptr<StreamInfo> info, TrackFragment* traf);
+  /// @param edit_list_offset is the edit list offset that is encoded in Edit
+  ///        List. It should be 0 if there is no EditList.
+  Fragmenter(std::shared_ptr<const StreamInfo> info,
+             TrackFragment* traf,
+             int64_t edit_list_offset);
 
   ~Fragmenter();
 
   /// Add a sample to the fragmenter.
   /// @param sample points to the sample to be added.
   /// @return OK on success, an error status otherwise.
-  Status AddSample(std::shared_ptr<MediaSample> sample);
+  Status AddSample(const MediaSample& sample);
 
   /// Initialize the fragment with default data.
   /// @param first_sample_dts specifies the decoding timestamp for the first
@@ -50,7 +55,7 @@ class Fragmenter {
   Status FinalizeFragment();
 
   /// Fill @a reference with current fragment information.
-  void GenerateSegmentReference(SegmentReference* reference);
+  void GenerateSegmentReference(SegmentReference* reference) const;
 
   void ClearFragmentFinalized() { fragment_finalized_ = false; }
 
@@ -62,14 +67,8 @@ class Fragmenter {
   bool fragment_initialized() const { return fragment_initialized_; }
   bool fragment_finalized() const { return fragment_finalized_; }
   BufferWriter* data() { return data_.get(); }
-
-  /// Set the flag use_decoding_timestamp_in_timeline, which if set to true, use
-  /// decoding timestamp instead of presentation timestamp in media timeline,
-  /// which is needed to workaround a Chromium bug that decoding timestamp is
-  /// used in buffered range, https://crbug.com/398130.
-  void set_use_decoding_timestamp_in_timeline(
-      bool use_decoding_timestamp_in_timeline) {
-    use_decoding_timestamp_in_timeline_ = use_decoding_timestamp_in_timeline;
+  const std::vector<KeyFrameInfo>& key_frame_infos() const {
+    return key_frame_infos_;
   }
 
  protected:
@@ -84,18 +83,20 @@ class Fragmenter {
  private:
   Status FinalizeFragmentForEncryption();
   // Check if the current fragment starts with SAP.
-  bool StartsWithSAP();
+  bool StartsWithSAP() const;
 
-  std::shared_ptr<StreamInfo> stream_info_;
-  bool use_decoding_timestamp_in_timeline_;
-  TrackFragment* traf_;
-  uint64_t seek_preroll_;
-  bool fragment_initialized_;
-  bool fragment_finalized_;
-  uint64_t fragment_duration_;
-  int64_t earliest_presentation_time_;
-  int64_t first_sap_time_;
+  std::shared_ptr<const StreamInfo> stream_info_;
+  TrackFragment* traf_ = nullptr;
+  int64_t edit_list_offset_ = 0;
+  int64_t seek_preroll_ = 0;
+  bool fragment_initialized_ = false;
+  bool fragment_finalized_ = false;
+  int64_t fragment_duration_ = 0;
+  int64_t earliest_presentation_time_ = 0;
+  int64_t first_sap_time_ = 0;
   std::unique_ptr<BufferWriter> data_;
+  // Saves key frames information, for Video.
+  std::vector<KeyFrameInfo> key_frame_infos_;
 
   DISALLOW_COPY_AND_ASSIGN(Fragmenter);
 };
@@ -123,4 +124,4 @@ bool Fragmenter::OptimizeSampleEntries(std::vector<T>* entries,
 }  // namespace media
 }  // namespace shaka
 
-#endif  // MEDIA_FORMATS_MP4_FRAGMENTER_H_
+#endif  // PACKAGER_MEDIA_FORMATS_MP4_FRAGMENTER_H_

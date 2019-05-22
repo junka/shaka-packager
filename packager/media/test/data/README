@@ -33,12 +33,19 @@ bear-640x360-hevc.ts - HEVC + AAC encode, multiplexed into an MPEG2-TS container
 // ISO-BMFF streams.
 bear-1280x720.mp4 - AVC + AAC encode, mulitplexed into an ISOBMFF container.
 bear-640x360.mp4  - Same as above, but in a different resolution.
-bear-640x360-hevc.mp4  - Same content, but encoded with HEVC.
+bear-640x360-ec3.mp4  - Same content, but audio encoded with E-AC3.
+bear-640x360-hevc.mp4  - Same content, but video encoded with HEVC.
 bear-320x180.mp4  - Same as above, but in a different resolution.
 bear-640x360-trailing-moov.mp4  - Same content, but with moov box in the end.
+bear-640x360-trailing-moov-additional-mdat.mp4  - Same content, but with moov box in the end and an additional unused mdat, which should be ignored.
 bear-640x360-av_frag.mp4  - Same content, but in fragmented mp4.
 bear-640x360-aac_lc-silent_right.mp4  - Audio only, stereo, but right channel is silent, with AAC-LC profile.
 bear-640x360-aac_he-silent_right.mp4  - Same as above, but with AAC-HE profile.
+bear-flac.mp4 - Unfragmented audio-only 44.1kHz FLAC in MP4 file, created using:
+  ffmpeg -i bear-1280x720.mp4 -map 0:0 -acodec flac -strict -2 bear-flac.mp4
+  Note, "-strict -2" was required because current ffmpeg libavformat version
+  57.75.100 indicates that flac in MP4 support is experimental.
+bear-640x360-no_edit_list.mp4  - Same content, but with EditLists removed.
 
 // Non square pixels.
 bear-640x360-non_square_pixel-with_pasp.mp4 - A non-square pixel version of the video track of bear-640x360.mp4 with PixelAspectRatio box.

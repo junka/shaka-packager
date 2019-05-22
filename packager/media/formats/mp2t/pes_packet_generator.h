@@ -28,7 +28,10 @@ class PesPacket;
 /// Methods are virtual for mocking.
 class PesPacketGenerator {
  public:
-  PesPacketGenerator();
+  /// @param transport_stream_timestamp_offset is the offset to be applied to
+  ///        sample timestamps to compensate for possible negative timestamps in
+  ///        the input.
+  explicit PesPacketGenerator(uint32_t transport_stream_timestamp_offset);
   virtual ~PesPacketGenerator();
 
   /// Initialize the object. This clears the internal state first so any
@@ -42,7 +45,7 @@ class PesPacketGenerator {
   /// NumberOfReadyPesPackets().
   /// If this returns false, the object may end up in an undefined state.
   /// @return true on success, false otherwise.
-  virtual bool PushSample(std::shared_ptr<MediaSample> sample);
+  virtual bool PushSample(const MediaSample& sample);
 
   /// @return The number of PES packets that are ready to be consumed.
   virtual size_t NumberOfReadyPesPackets();
@@ -62,6 +65,7 @@ class PesPacketGenerator {
 
   StreamType stream_type_;
 
+  const uint32_t transport_stream_timestamp_offset_ = 0;
   // Calculated by 90000 / input stream's timescale. This is used to scale the
   // timestamps.
   double timescale_scale_ = 0.0;
@@ -73,6 +77,8 @@ class PesPacketGenerator {
   // This can be used to create a PES from multiple audio samples.
   std::unique_ptr<PesPacket> current_processing_pes_;
 
+  // Audio stream id PES packet is codec dependent.
+  uint8_t audio_stream_id_ = 0;
   std::list<std::unique_ptr<PesPacket>> pes_packets_;
 
   DISALLOW_COPY_AND_ASSIGN(PesPacketGenerator);

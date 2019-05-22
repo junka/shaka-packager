@@ -6,27 +6,37 @@
 
 #include "packager/hls/base/simple_hls_notifier.h"
 
+#include <gflags/gflags.h>
 #include <cmath>
 
 #include "packager/base/base64.h"
 #include "packager/base/files/file_path.h"
-#include "packager/base/json/json_writer.h"
 #include "packager/base/logging.h"
 #include "packager/base/optional.h"
 #include "packager/base/strings/string_number_conversions.h"
 #include "packager/base/strings/stringprintf.h"
 #include "packager/hls/base/media_playlist.h"
-#include "packager/media/base/fixed_key_source.h"
+#include "packager/media/base/protection_system_ids.h"
 #include "packager/media/base/protection_system_specific_info.h"
-#include "packager/media/base/widevine_key_source.h"
+#include "packager/media/base/proto_json_util.h"
 #include "packager/media/base/widevine_pssh_data.pb.h"
 
+DEFINE_bool(enable_legacy_widevine_hls_signaling,
+            false,
+            "Specifies whether Legacy Widevine HLS, i.e. v1 is signalled in "
+            "the media playlist. Applies to Widevine protection system in HLS "
+            "with SAMPLE-AES only.");
+
 namespace shaka {
+
+using base::FilePath;
+
 namespace hls {
 
 namespace {
 
 const char kUriBase64Prefix[] = "data:text/plain;base64,";
+const char kUriFairPlayPrefix[] = "skd://";
 const char kWidevineDashIfIopUUID[] =
     "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
 
@@ -41,93 +51,136 @@ bool IsCommonSystemId(const std::vector<uint8_t>& system_id) {
          std::equal(system_id.begin(), system_id.end(), media::kCommonSystemId);
 }
 
-// TODO(rkuroiwa): Dedup these with the functions in MpdBuilder.
-std::string MakePathRelative(const std::string& original_path,
-                             const std::string& output_dir) {
-  return (original_path.find(output_dir) == 0)
-             ? original_path.substr(output_dir.size())
-             : original_path;
+bool IsFairPlaySystemId(const std::vector<uint8_t>& system_id) {
+  return system_id.size() == arraysize(media::kFairPlaySystemId) &&
+         std::equal(system_id.begin(), system_id.end(),
+                    media::kFairPlaySystemId);
 }
 
-void MakePathsRelativeToOutputDirectory(const std::string& output_dir,
-                                        MediaInfo* media_info) {
-  DCHECK(media_info);
-  const std::string kFileProtocol("file://");
-  std::string prefix_stripped_output_dir =
-      (output_dir.find(kFileProtocol) == 0)
-          ? output_dir.substr(kFileProtocol.size())
-          : output_dir;
+std::string Base64EncodeData(const std::string& prefix,
+                             const std::string& data) {
+    std::string data_base64;
+    base::Base64Encode(data, &data_base64);
+    return prefix + data_base64;
+}
 
-  if (prefix_stripped_output_dir.empty())
-    return;
+std::string VectorToString(const std::vector<uint8_t>& v) {
+    return std::string(v.begin(), v.end());
+}
 
-  std::string directory_with_separator(
-      base::FilePath::FromUTF8Unsafe(prefix_stripped_output_dir)
-      .AsEndingWithSeparator()
-      .AsUTF8Unsafe());
-  if (directory_with_separator.empty())
-    return;
+// TODO(rkuroiwa): Dedup these with the functions in MpdBuilder.
+// If |media_path| is contained in |parent_path|, then
+//   Strips the common path and keep only the relative part of |media_path|.
+//   e.g. if |parent_path| is /some/parent/ and
+//           |media_path| is /some/parent/abc/child/item.ext,
+//        abc/child/item.ext is returned.
+// else
+//   Returns |media_path|.
+// The path separator of the output is also changed to "/" if it is not.
+std::string MakePathRelative(const std::string& media_path,
+                             const FilePath& parent_path) {
+  FilePath relative_path;
+  const FilePath child_path = FilePath::FromUTF8Unsafe(media_path);
+  const bool is_child =
+      parent_path.AppendRelativePath(child_path, &relative_path);
+  if (!is_child)
+    relative_path = child_path;
+  return relative_path.NormalizePathSeparatorsTo('/').AsUTF8Unsafe();
+}
 
-  if (media_info->has_media_file_name()) {
-    media_info->set_media_file_name(MakePathRelative(
-        media_info->media_file_name(), directory_with_separator));
+// Segment URL is relative to either output directory or the directory
+// containing the media playlist depends on whether base_url is set.
+std::string GenerateSegmentUrl(const std::string& segment_name,
+                               const std::string& base_url,
+                               const std::string& output_dir,
+                               const std::string& playlist_file_name) {
+  FilePath output_path = FilePath::FromUTF8Unsafe(output_dir);
+  if (!base_url.empty()) {
+    // Media segment URL is base_url + segment path relative to output
+    // directory.
+    return base_url + MakePathRelative(segment_name, output_path);
   }
-  if (media_info->has_segment_template()) {
-    media_info->set_segment_template(MakePathRelative(
-        media_info->segment_template(), directory_with_separator));
+  // Media segment URL is segment path relative to the directory containing the
+  // playlist.
+  const FilePath playlist_dir =
+      output_path.Append(FilePath::FromUTF8Unsafe(playlist_file_name))
+          .DirName()
+          .AsEndingWithSeparator();
+  return MakePathRelative(segment_name, playlist_dir);
+}
+
+MediaInfo MakeMediaInfoPathsRelativeToPlaylist(
+    const MediaInfo& media_info,
+    const std::string& base_url,
+    const std::string& output_dir,
+    const std::string& playlist_name) {
+  MediaInfo media_info_copy = media_info;
+  if (media_info_copy.has_init_segment_name()) {
+    media_info_copy.set_init_segment_url(
+        GenerateSegmentUrl(media_info_copy.init_segment_name(), base_url,
+                           output_dir, playlist_name));
   }
+  if (media_info_copy.has_media_file_name()) {
+    media_info_copy.set_media_file_url(
+        GenerateSegmentUrl(media_info_copy.media_file_name(), base_url,
+                           output_dir, playlist_name));
+  }
+  if (media_info_copy.has_segment_template()) {
+    media_info_copy.set_segment_template_url(
+        GenerateSegmentUrl(media_info_copy.segment_template(), base_url,
+                           output_dir, playlist_name));
+  }
+  return media_info_copy;
 }
 
 bool WidevinePsshToJson(const std::vector<uint8_t>& pssh_box,
                         const std::vector<uint8_t>& key_id,
                         std::string* pssh_json) {
-  media::ProtectionSystemSpecificInfo pssh_info;
-  if (!pssh_info.Parse(pssh_box.data(), pssh_box.size())) {
+  std::unique_ptr<media::PsshBoxBuilder> pssh_builder =
+      media::PsshBoxBuilder::ParseFromBox(pssh_box.data(), pssh_box.size());
+  if (!pssh_builder) {
     LOG(ERROR) << "Failed to parse PSSH box.";
     return false;
   }
 
   media::WidevinePsshData pssh_proto;
-  if (!pssh_proto.ParseFromArray(pssh_info.pssh_data().data(),
-                                 pssh_info.pssh_data().size())) {
+  if (!pssh_proto.ParseFromArray(pssh_builder->pssh_data().data(),
+                                 pssh_builder->pssh_data().size())) {
     LOG(ERROR) << "Failed to parse protection_system_specific_data.";
     return false;
   }
-  if (!pssh_proto.has_provider() ||
-      (!pssh_proto.has_content_id() && pssh_proto.key_id_size() == 0)) {
-    LOG(ERROR) << "Missing fields to generate URI.";
-    return false;
+
+  media::WidevineHeader widevine_header;
+
+  if (pssh_proto.has_provider()) {
+    widevine_header.set_provider(pssh_proto.provider());
+  } else {
+    LOG(WARNING) << "Missing provider in Widevine PSSH. The content may not "
+                    "play in some devices.";
   }
 
-  base::DictionaryValue pssh_dict;
-  pssh_dict.SetString("provider", pssh_proto.provider());
   if (pssh_proto.has_content_id()) {
-    std::string content_id_base64;
-    base::Base64Encode(base::StringPiece(pssh_proto.content_id().data(),
-                                         pssh_proto.content_id().size()),
-                       &content_id_base64);
-    pssh_dict.SetString("content_id", content_id_base64);
+    widevine_header.set_content_id(pssh_proto.content_id());
+  } else {
+    LOG(WARNING) << "Missing content_id in Widevine PSSH. The content may not "
+                    "play in some devices.";
   }
-  base::ListValue* key_ids = new base::ListValue();
 
-  key_ids->AppendString(base::HexEncode(key_id.data(), key_id.size()));
-  for (const std::string& id : pssh_proto.key_id()) {
-    if (key_id.size() == id.size() &&
-        memcmp(key_id.data(), id.data(), id.size()) == 0) {
-      continue;
-    }
-    key_ids->AppendString(base::HexEncode(id.data(), id.size()));
+  // Place the current |key_id| to the front and converts all key_id to hex
+  // format.
+  widevine_header.add_key_ids(base::HexEncode(key_id.data(), key_id.size()));
+  for (const std::string& key_id_in_pssh : pssh_proto.key_id()) {
+    const std::string key_id_hex =
+        base::HexEncode(key_id_in_pssh.data(), key_id_in_pssh.size());
+    if (widevine_header.key_ids(0) != key_id_hex)
+      widevine_header.add_key_ids(key_id_hex);
   }
-  pssh_dict.Set("key_ids", key_ids);
 
-  if (!base::JSONWriter::Write(pssh_dict, pssh_json)) {
-    LOG(ERROR) << "Failed to write to JSON.";
-    return false;
-  }
+  *pssh_json = media::MessageToJsonString(widevine_header);
   return true;
 }
 
-base::Optional<MediaPlaylist::EncryptionMethod> StringToEncrypionMethod(
+base::Optional<MediaPlaylist::EncryptionMethod> StringToEncryptionMethod(
     const std::string& method) {
   if (method == "cenc") {
     return MediaPlaylist::EncryptionMethod::kSampleAesCenc;
@@ -157,11 +210,10 @@ void NotifyEncryptionToMediaPlaylist(
   if (!key_id.empty()) {
     key_id_string = "0x" + base::HexEncode(key_id.data(), key_id.size());
   }
-  std::string key_uri_data_base64;
-  base::Base64Encode(uri, &key_uri_data_base64);
+
   media_playlist->AddEncryptionInfo(
       encryption_method,
-      kUriBase64Prefix + key_uri_data_base64, key_id_string, iv_string,
+      uri, key_id_string, iv_string,
       key_format, key_format_version);
 }
 
@@ -172,15 +224,17 @@ bool HandleWidevineKeyFormats(
     const std::vector<uint8_t>& iv,
     const std::vector<uint8_t>& protection_system_specific_data,
     MediaPlaylist* media_playlist) {
-  if (encryption_method == MediaPlaylist::EncryptionMethod::kSampleAes) {
+  if (FLAGS_enable_legacy_widevine_hls_signaling &&
+      encryption_method == MediaPlaylist::EncryptionMethod::kSampleAes) {
     // This format allows SAMPLE-AES only.
     std::string key_uri_data;
     if (!WidevinePsshToJson(protection_system_specific_data, key_id,
                             &key_uri_data)) {
       return false;
     }
-    // This format does not have a key id field.
-    NotifyEncryptionToMediaPlaylist(encryption_method, key_uri_data,
+    std::string key_uri_data_base64 =
+        Base64EncodeData(kUriBase64Prefix, key_uri_data);
+    NotifyEncryptionToMediaPlaylist(encryption_method, key_uri_data_base64,
                                     std::vector<uint8_t>(), iv, "com.widevine",
                                     "1", media_playlist);
   }
@@ -188,16 +242,19 @@ bool HandleWidevineKeyFormats(
   std::string pssh_as_string(
       reinterpret_cast<const char*>(protection_system_specific_data.data()),
       protection_system_specific_data.size());
-  NotifyEncryptionToMediaPlaylist(encryption_method, pssh_as_string, key_id, iv,
-                                  kWidevineDashIfIopUUID, "1", media_playlist);
+  std::string key_uri_data_base64 =
+      Base64EncodeData(kUriBase64Prefix, pssh_as_string);
+  NotifyEncryptionToMediaPlaylist(encryption_method, key_uri_data_base64,
+                                  key_id, iv, kWidevineDashIfIopUUID, "1",
+                                  media_playlist);
   return true;
 }
 
 bool WriteMediaPlaylist(const std::string& output_dir,
                         MediaPlaylist* playlist) {
   std::string file_path =
-      base::FilePath::FromUTF8Unsafe(output_dir)
-          .Append(base::FilePath::FromUTF8Unsafe(playlist->file_name()))
+      FilePath::FromUTF8Unsafe(output_dir)
+          .Append(FilePath::FromUTF8Unsafe(playlist->file_name()))
           .AsUTF8Unsafe();
   if (!playlist->WriteToFile(file_path)) {
     LOG(ERROR) << "Failed to write playlist " << file_path;
@@ -211,26 +268,29 @@ bool WriteMediaPlaylist(const std::string& output_dir,
 MediaPlaylistFactory::~MediaPlaylistFactory() {}
 
 std::unique_ptr<MediaPlaylist> MediaPlaylistFactory::Create(
-    HlsPlaylistType type,
-    double time_shift_buffer_depth,
+    const HlsParams& hls_params,
     const std::string& file_name,
     const std::string& name,
     const std::string& group_id) {
-  return std::unique_ptr<MediaPlaylist>(new MediaPlaylist(
-      type, time_shift_buffer_depth, file_name, name, group_id));
+  return std::unique_ptr<MediaPlaylist>(
+      new MediaPlaylist(hls_params, file_name, name, group_id));
 }
 
-SimpleHlsNotifier::SimpleHlsNotifier(HlsPlaylistType playlist_type,
-                                     double time_shift_buffer_depth,
-                                     const std::string& prefix,
-                                     const std::string& output_dir,
-                                     const std::string& master_playlist_name)
-    : HlsNotifier(playlist_type),
-      time_shift_buffer_depth_(time_shift_buffer_depth),
-      prefix_(prefix),
-      output_dir_(output_dir),
-      media_playlist_factory_(new MediaPlaylistFactory()),
-      master_playlist_(new MasterPlaylist(master_playlist_name)) {}
+SimpleHlsNotifier::SimpleHlsNotifier(const HlsParams& hls_params)
+    : HlsNotifier(hls_params),
+      media_playlist_factory_(new MediaPlaylistFactory()) {
+  const base::FilePath master_playlist_path(
+      base::FilePath::FromUTF8Unsafe(hls_params.master_playlist_output));
+  master_playlist_dir_ = master_playlist_path.DirName().AsUTF8Unsafe();
+  const std::string& default_audio_langauge = hls_params.default_language;
+  const std::string& default_text_language =
+      hls_params.default_text_language.empty()
+          ? hls_params.default_language
+          : hls_params.default_text_language;
+  master_playlist_.reset(
+      new MasterPlaylist(master_playlist_path.BaseName().AsUTF8Unsafe(),
+                         default_audio_langauge, default_text_language));
+}
 
 SimpleHlsNotifier::~SimpleHlsNotifier() {}
 
@@ -245,12 +305,15 @@ bool SimpleHlsNotifier::NotifyNewStream(const MediaInfo& media_info,
                                         uint32_t* stream_id) {
   DCHECK(stream_id);
 
-  MediaInfo adjusted_media_info(media_info);
-  MakePathsRelativeToOutputDirectory(output_dir_, &adjusted_media_info);
+  const std::string relative_playlist_path = MakePathRelative(
+      playlist_name, FilePath::FromUTF8Unsafe(master_playlist_dir_));
 
   std::unique_ptr<MediaPlaylist> media_playlist =
-      media_playlist_factory_->Create(playlist_type(), time_shift_buffer_depth_,
-                                      playlist_name, name, group_id);
+      media_playlist_factory_->Create(hls_params(), relative_playlist_path,
+                                      name, group_id);
+  MediaInfo adjusted_media_info = MakeMediaInfoPathsRelativeToPlaylist(
+      media_info, hls_params().base_url, master_playlist_dir_,
+      media_playlist->file_name());
   if (!media_playlist->SetMediaInfo(adjusted_media_info)) {
     LOG(ERROR) << "Failed to set media info for playlist " << playlist_name;
     return false;
@@ -262,7 +325,7 @@ bool SimpleHlsNotifier::NotifyNewStream(const MediaInfo& media_info,
     const std::string& protection_scheme =
         media_info.protected_content().protection_scheme();
     base::Optional<MediaPlaylist::EncryptionMethod> enc_method =
-        StringToEncrypionMethod(protection_scheme);
+        StringToEncryptionMethod(protection_scheme);
     if (!enc_method) {
       LOG(ERROR) << "Failed to recognize protection scheme "
                  << protection_scheme;
@@ -271,9 +334,9 @@ bool SimpleHlsNotifier::NotifyNewStream(const MediaInfo& media_info,
     encryption_method = enc_method.value();
   }
 
-  *stream_id = sequence_number_.GetNext();
   base::AutoLock auto_lock(lock_);
-  master_playlist_->AddMediaPlaylist(media_playlist.get());
+  *stream_id = sequence_number_++;
+  media_playlists_.push_back(media_playlist.get());
   stream_map_[*stream_id].reset(
       new StreamEntry{std::move(media_playlist), encryption_method});
   return true;
@@ -291,12 +354,12 @@ bool SimpleHlsNotifier::NotifyNewSegment(uint32_t stream_id,
     LOG(ERROR) << "Cannot find stream with ID: " << stream_id;
     return false;
   }
-  const std::string relative_segment_name =
-      MakePathRelative(segment_name, output_dir_);
-
   auto& media_playlist = stream_iterator->second->media_playlist;
-  media_playlist->AddSegment(prefix_ + relative_segment_name, start_time,
-                             duration, start_byte_offset, size);
+  const std::string& segment_url =
+      GenerateSegmentUrl(segment_name, hls_params().base_url,
+                         master_playlist_dir_, media_playlist->file_name());
+  media_playlist->AddSegment(segment_url, start_time, duration,
+                             start_byte_offset, size);
 
   // Update target duration.
   uint32_t longest_segment_duration =
@@ -308,24 +371,52 @@ bool SimpleHlsNotifier::NotifyNewSegment(uint32_t stream_id,
   }
 
   // Update the playlists when there is new segments in live mode.
-  if (playlist_type() == HlsPlaylistType::kLive ||
-      playlist_type() == HlsPlaylistType::kEvent) {
-    if (!master_playlist_->WriteMasterPlaylist(prefix_, output_dir_)) {
-      LOG(ERROR) << "Failed to write master playlist.";
-      return false;
-    }
+  if (hls_params().playlist_type == HlsPlaylistType::kLive ||
+      hls_params().playlist_type == HlsPlaylistType::kEvent) {
     // Update all playlists if target duration is updated.
     if (target_duration_updated) {
-      for (auto& streams : stream_map_) {
-        MediaPlaylist* playlist = streams.second->media_playlist.get();
+      for (MediaPlaylist* playlist : media_playlists_) {
         playlist->SetTargetDuration(target_duration_);
-        if (!WriteMediaPlaylist(output_dir_, playlist))
+        if (!WriteMediaPlaylist(master_playlist_dir_, playlist))
           return false;
       }
     } else {
-      return WriteMediaPlaylist(output_dir_, media_playlist.get());
+      if (!WriteMediaPlaylist(master_playlist_dir_, media_playlist.get()))
+        return false;
+    }
+    if (!master_playlist_->WriteMasterPlaylist(
+            hls_params().base_url, master_playlist_dir_, media_playlists_)) {
+      LOG(ERROR) << "Failed to write master playlist.";
+      return false;
     }
   }
+  return true;
+}
+
+bool SimpleHlsNotifier::NotifyKeyFrame(uint32_t stream_id,
+                                       uint64_t timestamp,
+                                       uint64_t start_byte_offset,
+                                       uint64_t size) {
+  base::AutoLock auto_lock(lock_);
+  auto stream_iterator = stream_map_.find(stream_id);
+  if (stream_iterator == stream_map_.end()) {
+    LOG(ERROR) << "Cannot find stream with ID: " << stream_id;
+    return false;
+  }
+  auto& media_playlist = stream_iterator->second->media_playlist;
+  media_playlist->AddKeyFrame(timestamp, start_byte_offset, size);
+  return true;
+}
+
+bool SimpleHlsNotifier::NotifyCueEvent(uint32_t stream_id, uint64_t timestamp) {
+  base::AutoLock auto_lock(lock_);
+  auto stream_iterator = stream_map_.find(stream_id);
+  if (stream_iterator == stream_map_.end()) {
+    LOG(ERROR) << "Cannot find stream with ID: " << stream_id;
+    return false;
+  }
+  auto& media_playlist = stream_iterator->second->media_playlist;
+  media_playlist->AddPlacementOpportunity();
   return true;
 }
 
@@ -353,32 +444,54 @@ bool SimpleHlsNotifier::NotifyEncryptionUpdate(
                                     key_id, iv, protection_system_specific_data,
                                     media_playlist.get());
   }
+
+  // Key Id does not need to be specified with "identity" and "sdk".
+  const std::vector<uint8_t> empty_key_id;
+
   if (IsCommonSystemId(system_id)) {
-    // Use key_id as the key_uri. The player needs to have custom logic to
-    // convert it to the actual key url.
-    std::string key_uri_data;
-    key_uri_data.assign(key_id.begin(), key_id.end());
-    NotifyEncryptionToMediaPlaylist(encryption_method,
-                                    key_uri_data, std::vector<uint8_t>(), iv,
-                                    "identity", "", media_playlist.get());
+    std::string key_uri = hls_params().key_uri;
+    if (key_uri.empty()) {
+      // Use key_id as the key_uri. The player needs to have custom logic to
+      // convert it to the actual key uri.
+      std::string key_uri_data = VectorToString(key_id);
+      key_uri = Base64EncodeData(kUriBase64Prefix, key_uri_data);
+    }
+    NotifyEncryptionToMediaPlaylist(encryption_method, key_uri, empty_key_id,
+                                    iv, "identity", "", media_playlist.get());
+    return true;
+  } else if (IsFairPlaySystemId(system_id)) {
+    std::string key_uri = hls_params().key_uri;
+    if (key_uri.empty()) {
+      // Use key_id as the key_uri. The player needs to have custom logic to
+      // convert it to the actual key uri.
+      std::string key_uri_data = VectorToString(key_id);
+      key_uri = Base64EncodeData(kUriFairPlayPrefix, key_uri_data);
+    }
+
+    // FairPlay defines IV to be carried with the key, not the playlist.
+    const std::vector<uint8_t> empty_iv;
+    NotifyEncryptionToMediaPlaylist(encryption_method, key_uri, empty_key_id,
+                                    empty_iv, "com.apple.streamingkeydelivery",
+                                    "1", media_playlist.get());
     return true;
   }
-  LOG(ERROR) << "Unknown system ID: "
-             << base::HexEncode(system_id.data(), system_id.size());
-  return false;
+
+  LOG(WARNING) << "HLS: Ignore unknown or unsupported system ID: "
+               << base::HexEncode(system_id.data(), system_id.size());
+  return true;
 }
 
 bool SimpleHlsNotifier::Flush() {
   base::AutoLock auto_lock(lock_);
-  if (!master_playlist_->WriteMasterPlaylist(prefix_, output_dir_)) {
+  for (MediaPlaylist* playlist : media_playlists_) {
+    playlist->SetTargetDuration(target_duration_);
+    if (!WriteMediaPlaylist(master_playlist_dir_, playlist))
+      return false;
+  }
+  if (!master_playlist_->WriteMasterPlaylist(
+          hls_params().base_url, master_playlist_dir_, media_playlists_)) {
     LOG(ERROR) << "Failed to write master playlist.";
     return false;
-  }
-  for (auto& streams : stream_map_) {
-    MediaPlaylist* playlist = streams.second->media_playlist.get();
-    playlist->SetTargetDuration(target_duration_);
-    if (!WriteMediaPlaylist(output_dir_, playlist))
-      return false;
   }
   return true;
 }
